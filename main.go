@@ -37,7 +37,7 @@ func main() {
 	deviceManager := &DeviceManager{Verbose: verbose}
 
 	// Wait 1.5 seconds before listing devices with packet counts
-	log.Println("Waiting 1.5 seconds before listing devices...")
+	log.Println("Waiting 1.5 seconds before listing devices..")
 	time.Sleep(1500 * time.Millisecond)
 
 	// List devices and get packet counts over a 1.5-second duration
