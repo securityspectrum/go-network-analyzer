@@ -159,18 +159,22 @@ func dnsResponseCodeToString(dnsRCode layers.DNSResponseCode) string {
 func createLogFiles(baseDir string) (map[string]*os.File, error) {
 	logs := make(map[string]*os.File)
 
-	logTypes := []string{"conn", "dns", "http"}
-	for _, logType := range logTypes {
-		logDir := filepath.Join(baseDir, logType)
-		if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
-			return nil, err
-		}
-		logFileName := filepath.Join(logDir, time.Now().Format("20060102")+".log")
-		logFile, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Define the log file names
+	logFileNames := map[string]string{
+		"conn": "conn.log",
+		"dns":  "dns.log",
+		"http": "http.log",
+	}
+
+	for logType, fileName := range logFileNames {
+		logFilePath := filepath.Join(baseDir, fileName)
+		// Create or open the log file directly in the base directory
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return nil, err
 		}
 		logs[logType] = logFile
 	}
+
 	return logs, nil
 }

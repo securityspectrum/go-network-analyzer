@@ -4,15 +4,13 @@ import (
 	"crypto/sha256"
 	"flag"
 	"fmt"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 )
 
 const version = "1.0.0"
@@ -34,40 +32,74 @@ func main() {
 		return
 	}
 
+	// Load the configuration
+	config, err := LoadConfig(configFileName)
+	if err != nil {
+		log.Printf("Could not load config file, using defaults: %v", err)
+		config = getDefaultConfig()
+	}
+
+	// Apply configuration settings
+	logDir := config.LogDir
+	if logDir == "" {
+		logDir = GetDefaultLogDir()
+	}
+	log.Printf("Log directory: %s", logDir)
+
+	flushInterval := config.FlushInterval
+	if flushInterval == 0 {
+		flushInterval = 1 // Default to 1 second flush interval
+		log.Printf("Flush interval: %d seconds", flushInterval)
+	}
+
+	// DeviceManager initialization
 	deviceManager := &DeviceManager{Verbose: verbose}
+	var deviceName string
 
-	// Wait 1.5 seconds before listing devices with packet counts
-	log.Println("Waiting 1.5 seconds before listing devices..")
-	time.Sleep(1500 * time.Millisecond)
+	if config.SelectedInterface != "" {
+		deviceName = config.SelectedInterface
+	} else {
+		// Wait 1.5 seconds before listing devices with packet counts
+		log.Println("Waiting 1.5 seconds before listing devices..")
+		time.Sleep(1500 * time.Millisecond)
 
-	// List devices and get packet counts over a 1.5-second duration
-	devices, packetCounts, err := deviceManager.ListDevicesWithPacketCounts(1500 * time.Millisecond)
-	if err != nil {
-		log.Fatalf("Error listing devices: %v", err)
-	}
+		// List devices and get packet counts over a 1.5-second duration
+		devices, packetCounts, err := deviceManager.ListDevicesWithPacketCounts(1500 * time.Millisecond)
+		if err != nil {
+			log.Fatalf("Error listing devices: %v", err)
+		}
 
-	if len(devices) == 0 {
-		log.Fatal("No devices found. Exiting.")
-	}
+		if len(devices) == 0 {
+			log.Fatal("No devices found. Exiting.")
+		}
 
-	// If -list-devices is provided, just list devices and exit
-	if listDevicesFlag {
-		log.Println("Listing devices and exiting due to -list-devices flag.")
-		os.Exit(0)
-	}
+		// Prompt the user or automatically select the device with the highest packet count
+		deviceName, err = deviceManager.PromptUserOrAutoSelect(devices, packetCounts, 5*time.Second)
+		if err != nil {
+			log.Fatalf("Error selecting device: %v", err)
+		}
 
-	// Prompt the user or automatically select the device with the highest packet count
-	deviceName, err := deviceManager.PromptUserOrAutoSelect(devices, packetCounts, 5*time.Second)
-	if err != nil {
-		log.Fatalf("Error selecting device: %v", err)
+		// Save the selected interface to the config
+		config.SelectedInterface = deviceName
+		SaveConfig(configFileName, config)
 	}
 
 	log.Printf("Selected device: %s", deviceName)
-	runCapture(deviceName)
+	runCapture(deviceName, logDir, flushInterval)
 }
 
-func runCapture(deviceName string) {
-	logDir := filepath.Join(os.Getenv("USERPROFILE"), "Documents", "NetworkLogs")
+func runCapture(deviceName, logDir string, flushInterval int) {
+	// Check if the directory exists, and create it if it doesn't
+	if _, err := os.Stat(logDir); os.IsNotExist(err) {
+		log.Printf("Log directory does not exist. Creating: %s", logDir)
+		if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
+			log.Fatalf("Failed to create log directory: %s", err)
+		}
+	}
+
+	// Print the log directory path
+	log.Printf("Writing logs to directory: %s", logDir)
+
 	logFiles, err := createLogFiles(logDir)
 	if err != nil {
 		log.Fatalf("Failed to create log files: %v", err)
@@ -80,9 +112,9 @@ func runCapture(deviceName string) {
 
 	connManager := NewConnectionManager(connectionTimeout) // Use the configured timeout
 	context := NewLogContext()
-	context.AddStrategy("conn", NewConnLogStrategy(logFiles["conn"], connManager))
-	context.AddStrategy("dns", NewDNSLogStrategy(logFiles["dns"]))
-	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"]))
+	context.AddStrategy("conn", NewConnLogStrategy(logFiles["conn"], connManager, flushInterval))
+	context.AddStrategy("dns", NewDNSLogStrategy(logFiles["dns"], flushInterval))
+	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"], flushInterval))
 
 	var wg sync.WaitGroup
 
@@ -167,4 +199,11 @@ func generateSessionID(packet gopacket.Packet) string {
 // Generate a unique identifier for the session based on packet timestamp
 func generateUID(packet gopacket.Packet) string {
 	return fmt.Sprintf("%x", packet.Metadata().CaptureInfo.Timestamp.UnixNano())
+}
+
+func getDefaultConfig() *Config {
+	return &Config{
+		LogDir:        GetDefaultLogDir(),
+		FlushInterval: 1,
+	}
 }

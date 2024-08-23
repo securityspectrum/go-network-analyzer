@@ -26,13 +26,36 @@ type BaseLogger struct {
 	lock   sync.Mutex
 }
 
+// NewBaseLogger creates a new BaseLogger instance and starts the periodic flushing
 func NewBaseLogger(file *os.File) *BaseLogger {
-	return &BaseLogger{
+	logger := &BaseLogger{
 		file:   file,
 		writer: bufio.NewWriter(file),
 	}
+
+	// Start a goroutine to periodically flush the buffer every second
+	go logger.periodicFlush(1 * time.Second)
+
+	return logger
 }
 
+// periodicFlush periodically flushes the buffer every given interval
+func (logger *BaseLogger) periodicFlush(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		logger.lock.Lock()
+		err := logger.writer.Flush()
+		logger.lock.Unlock()
+
+		if err != nil {
+			log.Printf("Error flushing log buffer: %v", err)
+		}
+	}
+}
+
+// Close flushes the buffer and closes the file
 func (logger *BaseLogger) Close() {
 	logger.lock.Lock()
 	defer logger.lock.Unlock()
@@ -42,11 +65,19 @@ func (logger *BaseLogger) Close() {
 
 type ConnLogStrategy struct {
 	*BaseLogger
-	connManager *ConnectionManager
+	connManager   *ConnectionManager
+	flushInterval int
 }
 
-func NewConnLogStrategy(file *os.File, connManager *ConnectionManager) *ConnLogStrategy {
-	return &ConnLogStrategy{NewBaseLogger(file), connManager}
+func NewConnLogStrategy(file *os.File, connManager *ConnectionManager, flushInterval int) *ConnLogStrategy {
+	logger := &ConnLogStrategy{
+		BaseLogger:    NewBaseLogger(file),
+		connManager:   connManager,
+		flushInterval: flushInterval,
+	}
+	// Start a goroutine to periodically flush the buffer based on the flushInterval
+	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
+	return logger
 }
 
 func (logger *ConnLogStrategy) Log(event PacketEvent) {
@@ -121,10 +152,17 @@ func (logger *ConnLogStrategy) Log(event PacketEvent) {
 
 type DNSLogStrategy struct {
 	*BaseLogger
+	flushInterval int
 }
 
-func NewDNSLogStrategy(file *os.File) *DNSLogStrategy {
-	return &DNSLogStrategy{NewBaseLogger(file)}
+func NewDNSLogStrategy(file *os.File, flushInterval int) *DNSLogStrategy {
+	logger := &DNSLogStrategy{
+		BaseLogger:    NewBaseLogger(file),
+		flushInterval: flushInterval,
+	}
+	// Start a goroutine to periodically flush the buffer based on the flushInterval
+	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
+	return logger
 }
 
 func (logger *DNSLogStrategy) Log(event PacketEvent) {
@@ -219,10 +257,17 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 
 type HTTPLogStrategy struct {
 	*BaseLogger
+	flushInterval int
 }
 
-func NewHTTPLogStrategy(file *os.File) *HTTPLogStrategy {
-	return &HTTPLogStrategy{NewBaseLogger(file)}
+func NewHTTPLogStrategy(file *os.File, flushInterval int) *HTTPLogStrategy {
+	logger := &HTTPLogStrategy{
+		BaseLogger:    NewBaseLogger(file),
+		flushInterval: flushInterval,
+	}
+	// Start a goroutine to periodically flush the buffer based on the flushInterval
+	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
+	return logger
 }
 
 func parseHTTPRequest(payload []byte) (method, host, uri, userAgent, version string, requestBodyLen int) {
