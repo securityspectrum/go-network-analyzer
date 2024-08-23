@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"github.com/google/gopacket/layers"
 	"log"
 	"net/http"
 	"os"
@@ -10,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/google/gopacket/layers"
 )
 
 // LogStrategy interface defines the method that each logging strategy must implement
@@ -59,7 +58,10 @@ func (logger *BaseLogger) periodicFlush(interval time.Duration) {
 func (logger *BaseLogger) Close() {
 	logger.lock.Lock()
 	defer logger.lock.Unlock()
-	logger.writer.Flush()
+	err := logger.writer.Flush()
+	if err != nil {
+		log.Printf("Error flushing log buffer: %v", err)
+	}
 	logger.file.Close()
 }
 
