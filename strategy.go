@@ -110,7 +110,9 @@ func (logger *ConnLogStrategy) Log(event PacketEvent) {
 
 	conn := logger.connManager.GetConnection(event.SessionID)
 	if conn == nil {
-		log.Printf("Warning: Connection not found for session ID: %s", event.SessionID)
+		if verbose {
+			log.Printf("Warning: Connection not found for session ID: %s", event.SessionID)
+		}
 		return
 	}
 

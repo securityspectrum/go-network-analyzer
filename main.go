@@ -17,16 +17,21 @@ import (
 
 const version = "1.0.0"
 
-var verbose bool
-var listDevicesFlag bool
-var connectionTimeout time.Duration
-var showVersion bool
+var (
+	verbose           bool
+	listDevicesFlag   bool
+	connectionTimeout time.Duration
+	showVersion       bool
+	configFilePath    string // Renamed flag for the config file path
+)
 
 func main() {
+	// Define flags
 	flag.BoolVar(&showVersion, "version", false, "Show the version of the program")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&listDevicesFlag, "list-devices", false, "List available network devices")
 	flag.DurationVar(&connectionTimeout, "timeout", 120*time.Second, "Connection timeout duration")
+	flag.StringVar(&configFilePath, "config", "", "Path to configuration file") // Renamed flag
 	flag.Parse()
 
 	if showVersion {
@@ -34,11 +39,37 @@ func main() {
 		return
 	}
 
-	// Load the configuration
-	config, err := LoadConfig(configFileName)
-	if err != nil {
-		log.Printf("Could not load config file, using defaults: %v", err)
-		config = getDefaultConfig()
+	var config *Config
+	var err error
+
+	if configFilePath != "" {
+		// If the config flag is used, load the specified file and quit if not found
+		config, err = LoadConfigFromPath(configFilePath)
+		if err != nil {
+			log.Fatalf("Configuration file not found at specified path: %s", configFilePath)
+		}
+		log.Printf("Loaded configuration from specified path: %s", configFilePath)
+	} else {
+		// If no config flag, attempt to find the configuration file
+		config, err = LoadConfig()
+		if err != nil {
+			log.Printf("Could not find a configuration file, using defaults: %v", err)
+			config = getDefaultConfig()
+		}
+	}
+
+	// Handle listing devices and exit
+	if listDevicesFlag {
+		deviceManager := &DeviceManager{Verbose: verbose}
+		_, _, err := deviceManager.ListDevicesWithPacketCounts(3000 * time.Millisecond)
+		if err != nil {
+			log.Fatalf("Error listing devices: %v", err)
+		}
+
+		//for i, device := range devices {
+		//	fmt.Printf("%d: %s (%d packets)\n", i, device.Name, packetCounts[device.Name])
+		//}
+		return
 	}
 
 	// Apply configuration settings
@@ -51,7 +82,18 @@ func main() {
 	flushInterval := config.FlushInterval
 	if flushInterval == 0 {
 		flushInterval = 1 // Default to 1 second flush interval
-		log.Printf("Flush interval: %d seconds", flushInterval)
+		log.Printf("flush interval found, using default value: %d seconds", flushInterval)
+	}
+
+	log.Printf("Verbose mode enabled")
+	log.Printf("Using configuration:")
+	log.Printf("  Log directory: %s", logDir)
+	log.Printf("  Flush interval: %d seconds", flushInterval)
+	log.Printf("  Connection timeout: %s", connectionTimeout.String())
+	if config.SelectedInterface != "" {
+		log.Printf("  Selected interface: %s", config.SelectedInterface)
+	} else {
+		log.Printf("  Selected interface: any")
 	}
 
 	// Handle termination signals for graceful shutdown
@@ -67,41 +109,26 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		deviceManager := &DeviceManager{Verbose: verbose}
-		var deviceName string
+		deviceName := "any" // Default to 'any' if no interface is selected in the config
 
 		if config.SelectedInterface != "" {
 			deviceName = config.SelectedInterface
 		} else {
-			// Wait 1.5 seconds before listing devices with packet counts
-			log.Println("Waiting 1.5 seconds before listing devices..")
-			time.Sleep(1500 * time.Millisecond)
-
-			// List devices and get packet counts over a 1.5-second duration
-			devices, packetCounts, err := deviceManager.ListDevicesWithPacketCounts(1500 * time.Millisecond)
-			if err != nil {
-				log.Fatalf("Error listing devices: %v", err)
-			}
-
-			if len(devices) == 0 {
-				log.Fatal("No devices found. Exiting.")
-			}
-
-			// Prompt the user or automatically select the device with the highest packet count
-			deviceName, err = deviceManager.PromptUserOrAutoSelect(devices, packetCounts, 5*time.Second)
-			if err != nil {
-				log.Fatalf("Error selecting device: %v", err)
-			}
-
-			// Save the selected interface to the config
+			log.Println("No specific interface configured, using 'any'.")
+			// Save the default 'any' interface to the config
 			config.SelectedInterface = deviceName
-			SaveConfig(configFileName, config)
+			err := SaveConfig(config)
+			if err != nil {
+				log.Printf("Could not save config: %v", err)
+			}
 		}
 
-		log.Printf("Selected device: %s", deviceName)
+		if verbose {
+			log.Printf("Selected device: %s", deviceName)
+		}
 
 		// Capture process and log context setup
-		context = runCapture(deviceName, logDir, flushInterval)
+		context = runCapture(deviceName, logDir, flushInterval, stopChan)
 	}()
 
 	// Wait for a termination signal
@@ -122,7 +149,7 @@ func main() {
 	log.Println("Program has exited.")
 }
 
-func runCapture(deviceName, logDir string, flushInterval int) *LogContext {
+func runCapture(deviceName, logDir string, flushInterval int, stopChan chan struct{}) *LogContext {
 	// Check if the directory exists, and create it if it doesn't
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
 		log.Printf("Log directory does not exist. Creating: %s", logDir)
@@ -146,7 +173,6 @@ func runCapture(deviceName, logDir string, flushInterval int) *LogContext {
 	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"], flushInterval))
 
 	var wg sync.WaitGroup
-	stopChan := make(chan struct{})
 
 	wg.Add(1)
 	go capturePackets(deviceName, context, &wg, stopChan)
@@ -160,14 +186,9 @@ func runCapture(deviceName, logDir string, flushInterval int) *LogContext {
 		}
 	}()
 
-	go func() {
-		<-stopChan
-		log.Println("Received stop signal, waiting for capture to finish...")
-		wg.Wait() // Wait for the capturePackets goroutine to finish
-		ticker.Stop()
-		context.Close() // Ensure all logs are flushed
-	}()
+	wg.Wait()
 
+	ticker.Stop()
 	return context
 }
 
@@ -180,15 +201,20 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 	}
 	defer handle.Close()
 
-	log.Printf("Starting packet capture on device %s...\n", deviceName)
+	if verbose {
+		log.Printf("Starting packet capture on device %s...\n", deviceName)
+	}
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	packetChan := packetSource.Packets()
 
 	for {
 		select {
-		case packet := <-packetChan:
-			// Generate a session ID and other packet processing
+		case <-stopChan:
+			// Stop signal received, exit loop to stop capturing packets
+			log.Println("Stopping packet capture...")
+			return
+		case packet := <-packetSource.Packets():
+			// Process packet
 			sessionID := generateSessionID(packet)
 			uid := generateUID(packet)
 
@@ -203,10 +229,6 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 				SessionID: sessionID,
 				Packet:    packet,
 			})
-
-		case <-stopChan:
-			log.Println("Received stop signal, stopping packet capture.")
-			return
 		}
 	}
 }

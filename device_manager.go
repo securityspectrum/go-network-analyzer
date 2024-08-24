@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"strconv"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,50 +66,69 @@ func (dm *DeviceManager) ListDevicesWithPacketCounts(duration time.Duration) ([]
 
 	wg.Wait()
 
-	// Display the summary of packet counts
+	// Display the summary of packet counts with detailed device information
 	fmt.Println("Devices found (packet counts after 1.5 seconds):")
 	for i, device := range devices {
 		packetCount := packetCounts[device.Name]
-		fmt.Printf("%d: %s: %d packets\n", i, device.Name, packetCount)
+		fmt.Printf("%d: %s (%d packets)\n", i+1, device.Name, packetCount)
+		displayInterfaceDetails(device)
 	}
 
 	return devices, packetCounts, nil
 }
 
-func (dm *DeviceManager) PromptUserOrAutoSelect(devices []pcap.Interface, packetCounts map[string]int, duration time.Duration) (string, error) {
-	fmt.Println("\nPlease select a device number to capture packets from:")
-	fmt.Println("If no selection is made within 5 seconds, the device with the highest packet count will be automatically selected.")
-
-	userInput := make(chan string, 1)
-	go func() {
-		var deviceIndex string
-		fmt.Scanln(&deviceIndex)
-		userInput <- deviceIndex
-	}()
-
-	select {
-	case input := <-userInput:
-		index, err := strconv.Atoi(input)
-		if err != nil || index < 0 || index >= len(devices) {
-			return "", fmt.Errorf("invalid device number: %s", input)
+// displayInterfaceDetails formats and displays the details of the network interface
+func displayInterfaceDetails(device pcap.Interface) {
+	for _, address := range device.Addresses {
+		ip := address.IP.String()
+		netmask := net.IP(address.Netmask).String()
+		broadcast := "<none>"
+		if address.Broadaddr != nil {
+			broadcast = address.Broadaddr.String()
 		}
-		log.Printf("Selected device: %s", devices[index].Name)
-		return devices[index].Name, nil
-	case <-time.After(duration):
-		mostActiveDevice := findMostActiveDevice(packetCounts)
-		fmt.Printf("\nNo input received. Automatically selected device: %s with %d packets\n", mostActiveDevice, packetCounts[mostActiveDevice])
-		return mostActiveDevice, nil
+
+		// Display IP address and netmask (if applicable)
+		if isIPv4(ip) {
+			fmt.Printf("    inet %s/%s brd %s\n", ip, netmaskToCIDR(netmask), broadcast)
+		} else if isIPv6(ip) {
+			fmt.Printf("    inet6 %s/%s scope %s\n", ip, netmaskToCIDR(netmask), "link")
+		}
+
+		// Display MAC address if available
+		mac := getMACAddress(device.Name)
+		if mac != "" {
+			fmt.Printf("    link/ether %s\n", mac)
+		} else {
+			fmt.Printf("    link/ether <none>\n")
+		}
+		fmt.Printf("    State: UP\n") // Simplified state display
 	}
 }
 
-func findMostActiveDevice(packetCounts map[string]int) string {
-	var mostActiveDevice string
-	maxPackets := 0
-	for device, count := range packetCounts {
-		if count > maxPackets {
-			maxPackets = count
-			mostActiveDevice = device
-		}
+// netmaskToCIDR converts a netmask to CIDR notation
+func netmaskToCIDR(netmask string) string {
+	if netmask == "<nil>" {
+		return "unknown"
 	}
-	return mostActiveDevice
+	cidr, _ := net.IPMask(net.ParseIP(netmask).To4()).Size()
+	return fmt.Sprintf("%d", cidr)
+}
+
+// getMACAddress retrieves the MAC address of the specified network interface
+func getMACAddress(ifaceName string) string {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return ""
+	}
+	return iface.HardwareAddr.String()
+}
+
+// isIPv4 checks if an IP address is IPv4
+func isIPv4(ip string) bool {
+	return strings.Count(ip, ":") < 2
+}
+
+// isIPv6 checks if an IP address is IPv6
+func isIPv6(ip string) bool {
+	return strings.Count(ip, ":") >= 2
 }
