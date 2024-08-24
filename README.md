@@ -23,7 +23,7 @@ GOOS=windows GOARCH=amd64 go build -o network-analyzer-win.exe main.go types.go 
 
 For macOS:
 ```
-GOOS=darwin GOARCH=amd64 go build -o network-analyzer-darwin main.go types.go strategy.go connection.go device_manager.go constants.go config.go
+GOOS=darwin GOARCH=amd64 go build -o network-analyzer-macos-darwin main.go types.go strategy.go connection.go device_manager.go constants.go config.go
 chmod +x network-analyzer-darwin
 ./network-analyzer-darwin -verbose
 chmod +x network-analyzer-darwin
