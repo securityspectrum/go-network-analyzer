@@ -23,6 +23,8 @@ var (
 	connectionTimeout time.Duration
 	showVersion       bool
 	configFilePath    string // Renamed flag for the config file path
+	pcapFile          string
+	outputFormat      string
 )
 
 func main() {
@@ -31,7 +33,9 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&listDevicesFlag, "list-devices", false, "List available network devices")
 	flag.DurationVar(&connectionTimeout, "timeout", 120*time.Second, "Connection timeout duration")
-	flag.StringVar(&configFilePath, "config", "", "Path to configuration file") // Renamed flag
+	flag.StringVar(&configFilePath, "config", "", "Path to configuration file")
+	flag.StringVar(&pcapFile, "pcap", "", "Path to PCAP file for offline analysis")
+	flag.StringVar(&outputFormat, "format", "json", "Output format: 'json' or 'plain'")
 	flag.Parse()
 
 	if showVersion {
@@ -65,88 +69,44 @@ func main() {
 		if err != nil {
 			log.Fatalf("Error listing devices: %v", err)
 		}
-
-		//for i, device := range devices {
-		//	fmt.Printf("%d: %s (%d packets)\n", i, device.Name, packetCounts[device.Name])
-		//}
 		return
 	}
 
-	// Apply configuration settings
-	logDir := config.LogDir
-	if logDir == "" {
-		logDir = GetDefaultLogDir()
-	}
-	log.Printf("Log directory: %s", logDir)
+	var context *LogContext
 
-	flushInterval := config.FlushInterval
-	if flushInterval == 0 {
-		flushInterval = 1 // Default to 1 second flush interval
-		log.Printf("flush interval found, using default value: %d seconds", flushInterval)
-	}
-
-	log.Printf("Verbose mode enabled")
-	log.Printf("Using configuration:")
-	log.Printf("  Log directory: %s", logDir)
-	log.Printf("  Flush interval: %d seconds", flushInterval)
-	log.Printf("  Connection timeout: %s", connectionTimeout.String())
-	if config.SelectedInterface != "" {
-		log.Printf("  Selected interface: %s", config.SelectedInterface)
+	if pcapFile != "" {
+		// Process PCAP file
+		context, err = processPcapFile(pcapFile, config.LogDir, config.FlushInterval, outputFormat)
 	} else {
-		log.Printf("  Selected interface: any")
+		// Live capture
+		stopChan := make(chan struct{})
+		context = runCapture(config.SelectedInterface, config.LogDir, config.FlushInterval, stopChan)
 	}
 
-	// Handle termination signals for graceful shutdown
+	if err != nil {
+		log.Fatalf("Error processing packets: %v", err)
+	}
+
+	// Set up graceful shutdown
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
-	stopChan := make(chan struct{})
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	var context *LogContext
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		deviceName := "any" // Default to 'any' if no interface is selected in the config
-
-		if config.SelectedInterface != "" {
-			deviceName = config.SelectedInterface
-		} else {
-			log.Println("No specific interface configured, using 'any'.")
-			// Save the default 'any' interface to the config
-			config.SelectedInterface = deviceName
-			err := SaveConfig(config)
-			if err != nil {
-				log.Printf("Could not save config: %v", err)
-			}
-		}
-
-		if verbose {
-			log.Printf("Selected device: %s", deviceName)
-		}
-
-		// Capture process and log context setup
-		context = runCapture(deviceName, logDir, flushInterval, stopChan)
-	}()
-
-	// Wait for a termination signal
 	go func() {
 		sig := <-sigs
-		log.Printf("Received signal: %s, shutting down gracefully...", sig)
-		close(stopChan) // Signal to stop packet capture
-		wg.Wait()       // Wait for capture to finish
-		log.Println("Exiting program, ensuring all logs are flushed...")
-		if context != nil {
-			context.Close() // Ensure all logs are flushed
-		}
+		fmt.Println()
+		fmt.Println(sig)
 		done <- true
 	}()
 
-	// Ensure that the program doesn't exit prematurely
+	fmt.Println("Press Ctrl+C to stop")
 	<-done
-	log.Println("Program has exited.")
+	fmt.Println("Stopping...")
+
+	// Close log files
+	context.Close()
+
+	fmt.Println("Exiting")
 }
 
 func runCapture(deviceName, logDir string, flushInterval int, stopChan chan struct{}) *LogContext {
@@ -168,9 +128,9 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 
 	connManager := NewConnectionManager(connectionTimeout) // Use the configured timeout
 	context := NewLogContext()
-	context.AddStrategy("conn", NewConnLogStrategy(logFiles["conn"], connManager, flushInterval))
-	context.AddStrategy("dns", NewDNSLogStrategy(logFiles["dns"], flushInterval))
-	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"], flushInterval))
+	context.AddStrategy("conn", NewConnLogStrategy(logFiles["conn"], connManager, flushInterval, outputFormat))
+	context.AddStrategy("dns", NewDNSLogStrategy(logFiles["dns"], flushInterval, outputFormat))
+	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"], flushInterval, outputFormat))
 
 	var wg sync.WaitGroup
 
@@ -190,6 +150,64 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 
 	ticker.Stop()
 	return context
+}
+
+func processPcapFile(filename string, logDir string, flushInterval int, outputFormat string) (*LogContext, error) {
+	// Open the pcap file
+	handle, err := pcap.OpenOffline(filename)
+	if err != nil {
+		return nil, fmt.Errorf("error opening pcap file: %v", err)
+	}
+	defer handle.Close()
+
+	// Create log files
+	logFiles, err := createLogFiles(logDir)
+	if err != nil {
+		return nil, fmt.Errorf("error creating log files: %v", err)
+	}
+
+	// Initialize ConnectionManager
+	connectionManager := NewConnectionManager(5 * time.Minute)
+
+	// Initialize LogContext and strategies
+	context := NewLogContext()
+
+	// Highlight: Added outputFormat parameter to strategy initializations
+	connLogStrategy := NewConnLogStrategy(logFiles["conn"], connectionManager, flushInterval, outputFormat)
+	dnsLogStrategy := NewDNSLogStrategy(logFiles["dns"], flushInterval, outputFormat)
+	httpLogStrategy := NewHTTPLogStrategy(logFiles["http"], flushInterval, outputFormat)
+
+	context.AddStrategy("conn", connLogStrategy)
+	context.AddStrategy("dns", dnsLogStrategy)
+	context.AddStrategy("http", httpLogStrategy)
+
+	// Create packet source
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+
+	// Process packets
+	for packet := range packetSource.Packets() {
+		event := PacketEvent{
+			Timestamp: packet.Metadata().Timestamp,
+			Packet:    packet,
+			Uid:       generateUID(packet),
+			SessionID: generateSessionID(packet),
+		}
+
+		connectionManager.UpdateConnection(event)
+		context.Log(event)
+
+		if verbose {
+			log.Printf("Processed packet: %s -> %s\n",
+				packet.NetworkLayer().NetworkFlow().Src(),
+				packet.NetworkLayer().NetworkFlow().Dst())
+		}
+	}
+
+	if verbose {
+		log.Println("Finished processing PCAP file")
+	}
+
+	return context, nil
 }
 
 func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, stopChan chan struct{}) {

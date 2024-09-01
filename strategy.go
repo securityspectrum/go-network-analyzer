@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"github.com/google/gopacket/layers"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -69,13 +69,24 @@ type ConnLogStrategy struct {
 	*BaseLogger
 	connManager   *ConnectionManager
 	flushInterval int
+	outputFormat  string
 }
 
-func NewConnLogStrategy(file *os.File, connManager *ConnectionManager, flushInterval int) *ConnLogStrategy {
+func (logger *ConnLogStrategy) writeHeader() {
+	if logger.outputFormat == "plain" {
+		header := "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\tlocal_orig\tlocal_resp\tmissed_bytes\thistory\torig_pkts\torig_ip_bytes\tresp_pkts\tresp_ip_bytes\ttunnel_parents\n"
+		types := "#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\tstring\tbool\tbool\tcount\tstring\tcount\tcount\tcount\tcount\tset[string]\n"
+		logger.writer.WriteString(header)
+		logger.writer.WriteString(types)
+	}
+}
+
+func NewConnLogStrategy(file *os.File, connManager *ConnectionManager, flushInterval int, outputFormat string) *ConnLogStrategy {
 	logger := &ConnLogStrategy{
 		BaseLogger:    NewBaseLogger(file),
 		connManager:   connManager,
 		flushInterval: flushInterval,
+		outputFormat:  outputFormat,
 	}
 	// Start a goroutine to periodically flush the buffer based on the flushInterval
 	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
@@ -84,91 +95,158 @@ func NewConnLogStrategy(file *os.File, connManager *ConnectionManager, flushInte
 
 func (logger *ConnLogStrategy) Log(event PacketEvent) {
 	packet := event.Packet
-	var srcIP, dstIP, proto string
-	var srcPort, dstPort uint16
+	var origL2Addr, respL2Addr string
+	var vlan, innerVlan int
 
-	// Extract IP layer
-	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-		ip, _ := ipLayer.(*layers.IPv4)
-		srcIP = ip.SrcIP.String()
-		dstIP = ip.DstIP.String()
-		proto = ip.Protocol.String()
+	// Extract Ethernet layer for L2 addresses and VLAN info
+	if ethLayer := packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
+		eth, _ := ethLayer.(*layers.Ethernet)
+		origL2Addr = eth.SrcMAC.String()
+		respL2Addr = eth.DstMAC.String()
 	}
 
-	// Extract TCP/UDP layer
-	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		tcp, _ := tcpLayer.(*layers.TCP)
-		srcPort = uint16(tcp.SrcPort)
-		dstPort = uint16(tcp.DstPort)
-	} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
-		udp, _ := udpLayer.(*layers.UDP)
-		srcPort = uint16(udp.SrcPort)
-		dstPort = uint16(udp.DstPort)
+	// Extract VLAN info
+	if vlanLayer := packet.Layer(layers.LayerTypeDot1Q); vlanLayer != nil {
+		vlan1q, _ := vlanLayer.(*layers.Dot1Q)
+		vlan = int(vlan1q.VLANIdentifier)
+		if vlan1q.Type == layers.EthernetTypeDot1Q {
+			innerVlanLayer := packet.Layer(layers.LayerTypeDot1Q)
+			if innerVlanLayer != nil {
+				innerVlan1q, _ := innerVlanLayer.(*layers.Dot1Q)
+				innerVlan = int(innerVlan1q.VLANIdentifier)
+			}
+		}
 	}
 
 	logger.connManager.UpdateConnection(event)
 
-	conn := logger.connManager.GetConnection(event.SessionID)
+	conn := logger.connManager.GetConnection(event.Uid)
 	if conn == nil {
 		if verbose {
-			log.Printf("Warning: Connection not found for session ID: %s", event.SessionID)
+			log.Printf("Warning: Connection not found for UID: %s", event.Uid)
 		}
 		return
 	}
 
-	startTime := time.Unix(0, atomic.LoadInt64(&conn.startTime))
-	lastSeen := time.Unix(0, atomic.LoadInt64(&conn.lastSeen))
-	duration := lastSeen.Sub(startTime).Seconds()
+	logger.connManager.FinalizeConnection(conn)
 
 	logger.lock.Lock()
 	defer logger.lock.Unlock()
 	logEntry := ConnLog{
-		Timestamp:   event.Timestamp.Format(time.RFC3339),
-		Uid:         event.Uid,
-		SessionID:   event.SessionID,
-		SrcIP:       srcIP,
-		SrcPort:     srcPort,
-		DstIP:       dstIP,
-		DstPort:     dstPort,
-		Proto:       proto,
-		Duration:    duration,
-		OrigBytes:   conn.origBytes,
-		RespBytes:   conn.respBytes,
-		OrigPkts:    conn.origPkts,
-		RespPkts:    conn.respPkts,
-		OrigIPBytes: conn.origIPBytes,
-		RespIPBytes: conn.respIPBytes,
-		ConnState:   conn.connState,
-		PacketCount: conn.packetCount,
+		Timestamp:     time.Unix(0, conn.startTime).Format(time.RFC3339Nano),
+		Uid:           conn.uid,
+		OrigH:         conn.origH,
+		OrigP:         conn.origP,
+		RespH:         conn.respH,
+		RespP:         conn.respP,
+		Proto:         conn.protocol,
+		Service:       conn.service,
+		Duration:      conn.duration,
+		OrigBytes:     conn.origBytes,
+		RespBytes:     conn.respBytes,
+		ConnState:     logger.connManager.GetConnState(conn),
+		LocalOrig:     conn.localOrig,
+		LocalResp:     conn.localResp,
+		MissedBytes:   0, // Assuming we don't track missed bytes
+		History:       conn.history,
+		OrigPkts:      conn.origPkts,
+		OrigIPBytes:   conn.origIPBytes,
+		RespPkts:      conn.respPkts,
+		RespIPBytes:   conn.respIPBytes,
+		TunnelParents: []string{}, // Assuming we don't track tunnel parents
+		OrigL2Addr:    origL2Addr,
+		RespL2Addr:    respL2Addr,
+		Vlan:          vlan,
+		InnerVlan:     innerVlan,
 	}
-	jsonLogEntry, err := json.Marshal(logEntry)
-	if err != nil {
-		log.Println("Error encoding JSON:", err)
-		return
+
+	var logString string
+	if logger.outputFormat == "plain" {
+		logString = logger.formatPlainLog(logEntry)
+	} else {
+		jsonLogEntry, err := json.Marshal(logEntry)
+		if err != nil {
+			log.Println("Error encoding JSON:", err)
+			return
+		}
+		logString = string(jsonLogEntry)
 	}
-	logger.writer.Write(jsonLogEntry)
-	logger.writer.Write([]byte("\n"))
+
+	logger.writer.WriteString(logString + "\n")
 
 	if verbose {
-		log.Printf("Logged connection event: %s\n", jsonLogEntry)
+		log.Printf("Logged connection event: %s\n", logString)
 	}
+}
+
+func (logger *ConnLogStrategy) formatPlainLog(connLog ConnLog) string {
+	tunnelParents := "-"
+	if len(connLog.TunnelParents) > 0 {
+		tunnelParents = strings.Join(connLog.TunnelParents, ",")
+	}
+
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%.6f\t%d\t%d\t%s\t%t\t%t\t%d\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%d",
+		connLog.Timestamp,
+		connLog.Uid,
+		connLog.OrigH,
+		connLog.OrigP,
+		connLog.RespH,
+		connLog.RespP,
+		connLog.Proto,
+		connLog.Service,
+		connLog.Duration,
+		connLog.OrigBytes,
+		connLog.RespBytes,
+		connLog.ConnState,
+		connLog.LocalOrig,
+		connLog.LocalResp,
+		connLog.MissedBytes,
+		connLog.History,
+		connLog.OrigPkts,
+		connLog.OrigIPBytes,
+		connLog.RespPkts,
+		connLog.RespIPBytes,
+		tunnelParents,
+		connLog.OrigL2Addr,
+		connLog.RespL2Addr,
+		connLog.Vlan,
+		connLog.InnerVlan,
+	)
+}
+
+// Helper function to format tunnel parents
+func formatTunnelParents(tunnelParents []string) string {
+	if len(tunnelParents) == 0 {
+		return "-"
+	}
+	return strings.Join(tunnelParents, ",")
 }
 
 type DNSLogStrategy struct {
 	*BaseLogger
 	flushInterval int
+	outputFormat  string
 }
 
-func NewDNSLogStrategy(file *os.File, flushInterval int) *DNSLogStrategy {
+func NewDNSLogStrategy(file *os.File, flushInterval int, outputFormat string) *DNSLogStrategy {
 	logger := &DNSLogStrategy{
 		BaseLogger:    NewBaseLogger(file),
 		flushInterval: flushInterval,
+		outputFormat:  outputFormat,
 	}
 	// Start a goroutine to periodically flush the buffer based on the flushInterval
 	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
 	return logger
 }
 
+func (logger *DNSLogStrategy) writeHeader() {
+	if logger.outputFormat == "plain" {
+		header := "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\ttrans_id\tquery\tqclass\tqclass_name\tqtype\tqtype_name\trcode\trcode_name\tAA\tTC\tRD\tRA\tZ\tanswers\tTTLs\trejected\n"
+		types := "#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tcount\tstring\tcount\tstring\tcount\tstring\tcount\tstring\tbool\tbool\tbool\tbool\tcount\tvector[string]\tvector[interval]\tbool\n"
+		logger.writer.WriteString(header)
+		logger.writer.WriteString(types)
+	}
+}
 func (logger *DNSLogStrategy) Log(event PacketEvent) {
 	packet := event.Packet
 	var srcIP, dstIP, proto string
@@ -224,6 +302,7 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 
 	logger.lock.Lock()
 	defer logger.lock.Unlock()
+
 	logEntry := DNSLog{
 		Timestamp: event.Timestamp.Format(time.RFC3339),
 		Uid:       event.Uid,
@@ -246,28 +325,89 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		TTLs:      dnsTTLs,
 		Rejected:  dnsRejected,
 	}
-	jsonLogEntry, err := json.Marshal(logEntry)
-	if err != nil {
-		log.Println("Error encoding JSON:", err)
-		return
+
+	var logString string
+	if logger.outputFormat == "plain" {
+		logString = logger.formatPlainLog(logEntry)
+	} else {
+		jsonLogEntry, err := json.Marshal(logEntry)
+		if err != nil {
+			log.Println("Error encoding JSON:", err)
+			return
+		}
+		logString = string(jsonLogEntry)
 	}
-	logger.writer.Write(jsonLogEntry)
-	logger.writer.Write([]byte("\n"))
+
+	logger.writer.WriteString(logString + "\n")
 
 	if verbose {
-		log.Printf("Logged DNS event: %s\n", jsonLogEntry)
+		log.Printf("Logged DNS event: %s\n", logString)
 	}
+}
+
+func (logger *DNSLogStrategy) formatPlainLog(dnsLog DNSLog) string {
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%t\t%t\t%t\t%t\t%d\t%s\t%s\t%t",
+		dnsLog.Timestamp,
+		dnsLog.Uid,
+		dnsLog.OrigH,
+		dnsLog.OrigP,
+		dnsLog.RespH,
+		dnsLog.RespP,
+		dnsLog.Proto,
+		dnsLog.TransID,
+		dnsLog.Query,
+		0,   // qclass (not implemented in this example)
+		"-", // qclass_name (not implemented in this example)
+		0,   // qtype (not implemented in this example)
+		"-", // qtype_name (not implemented in this example)
+		dnsLog.RCode,
+		dnsLog.RCodeName,
+		dnsLog.AA,
+		dnsLog.TC,
+		dnsLog.RD,
+		dnsLog.RA,
+		dnsLog.Z,
+		strings.Join(dnsLog.Answers, ","),
+		formatTTLs(dnsLog.TTLs),
+		dnsLog.Rejected,
+	)
+}
+
+func extractDNSAnswers(dns *layers.DNS) []string {
+	var answers []string
+	for _, answer := range dns.Answers {
+		answers = append(answers, string(answer.Name))
+	}
+	return answers
+}
+
+func extractDNSTTLs(dns *layers.DNS) []uint32 {
+	var ttls []uint32
+	for _, answer := range dns.Answers {
+		ttls = append(ttls, answer.TTL)
+	}
+	return ttls
+}
+
+func formatTTLs(ttls []uint32) string {
+	var ttlStrings []string
+	for _, ttl := range ttls {
+		ttlStrings = append(ttlStrings, fmt.Sprintf("%d", ttl))
+	}
+	return strings.Join(ttlStrings, ",")
 }
 
 type HTTPLogStrategy struct {
 	*BaseLogger
 	flushInterval int
+	outputFormat  string
 }
 
-func NewHTTPLogStrategy(file *os.File, flushInterval int) *HTTPLogStrategy {
+func NewHTTPLogStrategy(file *os.File, flushInterval int, outputFormat string) *HTTPLogStrategy {
 	logger := &HTTPLogStrategy{
 		BaseLogger:    NewBaseLogger(file),
 		flushInterval: flushInterval,
+		outputFormat:  outputFormat,
 	}
 	// Start a goroutine to periodically flush the buffer based on the flushInterval
 	go logger.periodicFlush(time.Duration(flushInterval) * time.Second)
@@ -368,17 +508,54 @@ func (logger *HTTPLogStrategy) Log(event PacketEvent) {
 		Tags:            tags,
 		RespFuids:       respFuids,
 	}
-	jsonLogEntry, err := json.Marshal(logEntry)
-	if err != nil {
-		log.Println("Error encoding JSON:", err)
-		return
+	var logString string
+	if logger.outputFormat == "plain" {
+		logString = logger.formatPlainLog(logEntry)
+	} else {
+		jsonLogEntry, err := json.Marshal(logEntry)
+		if err != nil {
+			log.Println("Error encoding JSON:", err)
+			return
+		}
+		logString = string(jsonLogEntry)
 	}
-	logger.writer.Write(jsonLogEntry)
-	logger.writer.Write([]byte("\n"))
+
+	logger.writer.WriteString(logString + "\n")
 
 	if verbose {
-		log.Printf("Logged HTTP event: %s\n", jsonLogEntry)
+		log.Printf("Logged DNS event: %s\n", logString)
 	}
+}
+
+func (logger *HTTPLogStrategy) formatPlainLog(httpLog HTTPLog) string {
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s",
+		httpLog.Timestamp,
+		httpLog.Uid,
+		httpLog.OrigH,
+		httpLog.OrigP,
+		httpLog.RespH,
+		httpLog.RespP,
+		httpLog.Proto,
+		httpLog.TransDepth,
+		httpLog.Method,
+		httpLog.Host,
+		httpLog.URI,
+		httpLog.Version,
+		httpLog.UserAgent,
+		httpLog.RequestBodyLen,
+		httpLog.ResponseBodyLen,
+		httpLog.StatusCode,
+		httpLog.StatusMsg,
+		formatTags(httpLog.Tags),
+	)
+}
+
+// Helper function to format tags
+func formatTags(tags []string) string {
+	if len(tags) == 0 {
+		return "-"
+	}
+	return strings.Join(tags, ",")
 }
 
 func isHTTPRequest(payload []byte) bool {

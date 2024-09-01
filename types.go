@@ -17,15 +17,13 @@ type PacketEvent struct {
 	Packet    gopacket.Packet
 }
 
-// ConnLog represents a connection log entry.
 type ConnLog struct {
 	Timestamp     string   `json:"ts"`
 	Uid           string   `json:"uid"`
-	SessionID     string   `json:"session_id"`
-	SrcIP         string   `json:"id.orig_h"`
-	SrcPort       uint16   `json:"id.orig_p"`
-	DstIP         string   `json:"id.resp_h"`
-	DstPort       uint16   `json:"id.resp_p"`
+	OrigH         string   `json:"id.orig_h"`
+	OrigP         uint16   `json:"id.orig_p"`
+	RespH         string   `json:"id.resp_h"`
+	RespP         uint16   `json:"id.resp_p"`
 	Proto         string   `json:"proto"`
 	Service       string   `json:"service,omitempty"`
 	Duration      float64  `json:"duration,omitempty"`
