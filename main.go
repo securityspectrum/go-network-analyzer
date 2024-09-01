@@ -4,15 +4,16 @@ import (
 	"crypto/sha256"
 	"flag"
 	"fmt"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 )
 
 const version = "1.0.0"
@@ -77,17 +78,20 @@ func main() {
 	if pcapFile != "" {
 		// Process PCAP file
 		context, err = processPcapFile(pcapFile, config.LogDir, config.FlushInterval, outputFormat)
+		if err != nil {
+			log.Fatalf("Error processing packets: %v", err)
+		}
+		// Close log files and exit after processing PCAP file
+		context.Close()
+		fmt.Println("Finished processing PCAP file")
+		return
 	} else {
 		// Live capture
 		stopChan := make(chan struct{})
 		context = runCapture(config.SelectedInterface, config.LogDir, config.FlushInterval, stopChan)
 	}
 
-	if err != nil {
-		log.Fatalf("Error processing packets: %v", err)
-	}
-
-	// Set up graceful shutdown
+	// Set up graceful shutdown for live capture
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
