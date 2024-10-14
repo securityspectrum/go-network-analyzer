@@ -18,21 +18,19 @@ To build a binary:
 
 For windows:
 ```
-GOOS=windows GOARCH=amd64 go build -o network-analyzer-win.exe main.go types.go strategy.go connection.go device_manager.go constants.go config.go
+GOOS=windows GOARCH=amd64 go build -o network-analyzer-win.exe . 
 ```
 
 For macOS:
 ```
-GOOS=darwin GOARCH=amd64 go build -o network-analyzer-macos-darwin main.go types.go strategy.go connection.go device_manager.go constants.go config.go
-chmod +x network-analyzer-darwin
-./network-analyzer-darwin -verbose
+GOOS=darwin GOARCH=amd64 go build -o network-analyzer-macos-darwin . 
 chmod +x network-analyzer-darwin
 ./network-analyzer-darwin -verbose
 ```
 
 For Linux:
 ```
-GOOS=linux GOARCH=amd64 go build -o network-analyzer-linux main.go types.go strategy.go connection.go device_manager.go constants.go config.go
+GOOS=linux GOARCH=amd64 go build -o network-analyzer-linux . 
 chmod +x network-analyzer-linux
 ./network-analyzer-linux -verbose
 ```

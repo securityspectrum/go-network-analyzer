@@ -4,13 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/google/gopacket/layers"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/gopacket/layers"
 )
 
 // LogStrategy interface defines the method that each logging strategy must implement

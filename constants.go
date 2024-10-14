@@ -13,7 +13,7 @@ const AppName = "ss-network-analyzer"
 const (
 	NETWORK_ANALYZER_LOG_PATH_LINUX   = "/var/log/" + AppName + "/"
 	NETWORK_ANALYZER_LOG_PATH_MACOS   = "/usr/local/var/log/" + AppName + "/"
-	NETWORK_ANALYZER_LOG_PATH_WINDOWS = `C:\ProgramData\` + AppName + `\logs\`
+	NETWORK_ANALYZER_LOG_PATH_WINDOWS = `C:/ProgramData/` + AppName + `/logs/`
 )
 
 // GetDefaultLogDir returns the default log directory based on the operating system

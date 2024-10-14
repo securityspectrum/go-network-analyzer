@@ -19,7 +19,7 @@ type Config struct {
 const (
 	SS_NETWORK_ANALYZER_CONFIG_DIR_LINUX   = "/etc/" + AppName + "/config"
 	SS_NETWORK_ANALYZER_CONFIG_DIR_MACOS   = "/Library/Application Support/" + AppName + "/config"
-	SS_NETWORK_ANALYZER_CONFIG_DIR_WINDOWS = `C:\ProgramData\` + AppName + `\config`
+	SS_NETWORK_ANALYZER_CONFIG_DIR_WINDOWS = `C:/ProgramData/` + AppName + `/config`
 )
 
 // GetConfigPaths returns a list of potential configuration file paths
