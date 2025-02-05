@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"log"
 	"os"
@@ -81,7 +80,7 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 			if packet == nil {
 				continue
 			}
-			// Process packet
+			// Use our updated generateSessionID
 			sessionID := generateSessionID(packet)
 			uid := generateUID(packet)
 
@@ -158,33 +157,37 @@ func processPcapFile(filename string, logDir string, flushInterval int, outputFo
 	return context, nil
 }
 
-// Generate a unique session ID based on packet IP and port information using SHA256
+// Updated generateSessionID: now uses determineEndpoints to be consistent with updateConnection.
 func generateSessionID(packet gopacket.Packet) string {
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
-	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	udpLayer := packet.Layer(layers.LayerTypeUDP)
-	var srcIP, dstIP string
-	var srcPort, dstPort uint16
-
-	if ipLayer != nil {
-		ip, _ := ipLayer.(*layers.IPv4)
-		srcIP = ip.SrcIP.String()
-		dstIP = ip.DstIP.String()
+	if ipLayer == nil {
+		return ""
 	}
+	ip, _ := ipLayer.(*layers.IPv4)
+	srcIP := ip.SrcIP.String()
+	dstIP := ip.DstIP.String()
 
-	if tcpLayer != nil {
-		tcp, _ := tcpLayer.(*layers.TCP)
+	var srcPort, dstPort uint16
+	var protocol string
+	var tcp *layers.TCP
+	if t := packet.Layer(layers.LayerTypeTCP); t != nil {
+		tcp = t.(*layers.TCP)
 		srcPort = uint16(tcp.SrcPort)
 		dstPort = uint16(tcp.DstPort)
-	} else if udpLayer != nil {
-		udp, _ := udpLayer.(*layers.UDP)
+		protocol = "tcp"
+	} else if u := packet.Layer(layers.LayerTypeUDP); u != nil {
+		udp := u.(*layers.UDP)
 		srcPort = uint16(udp.SrcPort)
 		dstPort = uint16(udp.DstPort)
+		protocol = "udp"
+	} else {
+		srcPort = 0
+		dstPort = 0
+		protocol = "unknown_transport"
 	}
 
-	data := fmt.Sprintf("%s:%d-%s:%d", srcIP, srcPort, dstIP, dstPort)
-	hash := sha256.Sum256([]byte(data))
-	return fmt.Sprintf("%x", hash)
+	origH, origP, respH, respP := determineEndpoints(srcIP, srcPort, dstIP, dstPort, tcp)
+	return GetConnectionKey(origH, origP, respH, respP, protocol)
 }
 
 // Generate a unique identifier for the session based on packet timestamp

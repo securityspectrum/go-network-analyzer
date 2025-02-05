@@ -44,6 +44,7 @@ type ConnLog struct {
 	Vlan          int      `json:"vlan,omitempty"`
 	InnerVlan     int      `json:"inner_vlan,omitempty"`
 	PacketCount   uint64   `json:"packet_count"`
+	IPProto       int      `json:"ip_proto"`
 }
 
 // DNSLog represents a DNS log entry.

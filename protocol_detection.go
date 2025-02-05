@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"strings"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -124,3 +126,40 @@ func detectDHCP(data []byte) bool {
 }
 
 // Add more protocol detection functions as needed
+
+func detectService(conn *Connection) {
+	// Port-based detection
+	switch conn.respP {
+	case 80, 8080:
+		conn.service = "http"
+	case 443:
+		conn.service = "ssl"
+	case 53:
+		conn.service = "dns"
+	// Add more ports as needed
+	default:
+		conn.service = ""
+	}
+}
+
+func DetectServiceForConnection(conn *Connection, packet gopacket.Packet) string {
+	detected := DetectProtocol(conn, packet)
+	if detected != "unknown" {
+		return strings.ToLower(detected)
+	}
+	return fallbackService(conn)
+}
+
+func fallbackService(conn *Connection) string {
+	switch conn.respP {
+	case 80, 8080:
+		return "http"
+	case 443:
+		return "ssl"
+	case 53:
+		return "dns"
+	// Add more port heuristics if needed
+	default:
+		return ""
+	}
+}
