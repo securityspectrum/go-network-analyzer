@@ -18,39 +18,40 @@ import (
 
 // Connection represents the state of a network connection.
 type Connection struct {
-	origH        string
-	origP        uint16
-	respH        string
-	respP        uint16
-	protocol     string
-	ipVersion    int
-	uid          string
-	startTime    float64 // stored in seconds
-	lastSeen     float64 // stored in seconds
-	origBytes    int
-	respBytes    int
-	origPkts     int
-	respPkts     int
-	service      string
-	duration     float64
-	origIPBytes  int
-	respIPBytes  int
-	history      string
-	seenFirstAck bool
-	origState    string
-	respState    string
-	localOrig    bool
-	localResp    bool
-	PacketCount  uint64
-	logged       bool
-	ipProto      int
-	lastPacketTS float64
+	origH          string
+	origP          uint16
+	respH          string
+	respP          uint16
+	protocol       string
+	ipVersion      int
+	uid            string
+	startTime      float64
+	lastSeen       float64
+	productiveTime float64
+	origBytes      int
+	respBytes      int
+	origPkts       int
+	respPkts       int
+	service        string
+	duration       float64
+	origIPBytes    int
+	respIPBytes    int
+	history        string
+	seenFirstAck   bool
+	origState      string
+	respState      string
+	localOrig      bool
+	localResp      bool
+	PacketCount    uint64
+	logged         bool
+	ipProto        int
+	lastPacketTS   float64
 }
 
 type ConnectionManager struct {
 	connections      sync.Map
 	totalConnections uint64
-	timeout          time.Duration // Connection timeout duration
+	timeout          time.Duration // Connection timeout duration (for TCP)
 }
 
 func NewConnectionManager(timeout time.Duration) *ConnectionManager {
@@ -93,11 +94,14 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 	ip, _ := ipLayer.(*layers.IPv4)
 	ipProto := int(ip.Protocol)
 
-	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	udpLayer := packet.Layer(layers.LayerTypeUDP)
-
 	var srcPort, dstPort uint16
 	var protocol string
+
+	// Handle TCP, UDP, and ICMP properly
+	tcpLayer := packet.Layer(layers.LayerTypeTCP)
+	udpLayer := packet.Layer(layers.LayerTypeUDP)
+	icmpLayer := packet.Layer(layers.LayerTypeICMPv4)
+
 	if tcpLayer != nil {
 		tcp, _ := tcpLayer.(*layers.TCP)
 		srcPort = uint16(tcp.SrcPort)
@@ -108,20 +112,23 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 		srcPort = uint16(udp.SrcPort)
 		dstPort = uint16(udp.DstPort)
 		protocol = "udp"
-	} else {
-		srcPort = 0
+	} else if icmpLayer != nil {
+		icmp, _ := icmpLayer.(*layers.ICMPv4)
+		srcPort = uint16(icmp.TypeCode >> 8)
 		dstPort = 0
+		protocol = "icmp"
+	} else {
 		protocol = "unknown_transport"
 	}
 
 	srcIP := ip.SrcIP.String()
 	dstIP := ip.DstIP.String()
 
+	// Determine connection direction and local/remote status
 	var origH, respH string
 	var origP, respP uint16
 	var localOrig, localResp bool
 
-	// Decide local vs. remote if exactly one side is local
 	if isLocalIP(srcIP) && !isLocalIP(dstIP) {
 		origH, origP, respH, respP = srcIP, srcPort, dstIP, dstPort
 		localOrig = true
@@ -131,65 +138,52 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 		localOrig = false
 		localResp = true
 	} else {
-		// Both sides local or both sides remote -> fallback
-		if tcpLayer != nil {
-			tcp, _ := tcpLayer.(*layers.TCP)
-			oh, op, rh, rp := determineEndpoints(srcIP, srcPort, dstIP, dstPort, tcp)
-			origH, origP, respH, respP = oh, op, rh, rp
-		} else {
-			oh, op, rh, rp := determineEndpoints(srcIP, srcPort, dstIP, dstPort, nil)
-			origH, origP, respH, respP = oh, op, rh, rp
-		}
-		// If both local, mark both sides local
-		if isLocalIP(origH) && isLocalIP(respH) {
-			localOrig, localResp = true, true
-		}
+		origH, origP, respH, respP = determineEndpoints(srcIP, srcPort, dstIP, dstPort, nil)
+		localOrig = isLocalIP(origH)
+		localResp = isLocalIP(respH)
 	}
 
 	key := GetConnectionKey(origH, origP, respH, respP, protocol)
 	nowSec := float64(event.Timestamp.UnixNano()) / 1e9
 
-	// Either load existing or create new
+	// Get or create connection
 	value, exists := cm.connections.Load(key)
+	var conn *Connection
 	if !exists {
-		conn := &Connection{
+		conn = &Connection{
 			origH:        origH,
 			origP:        origP,
 			respH:        respH,
 			respP:        respP,
 			protocol:     protocol,
-			ipVersion:    4,
 			startTime:    nowSec,
 			lastSeen:     nowSec,
-			origState:    "INIT",
-			respState:    "INIT",
-			uid:          generateConnectionUID(),
+			uid:          event.Uid,
 			localOrig:    localOrig,
 			localResp:    localResp,
 			ipProto:      ipProto,
-			lastPacketTS: nowSec, // initialize
+			lastPacketTS: nowSec,
 		}
 		cm.connections.Store(key, conn)
 		atomic.AddUint64(&cm.totalConnections, 1)
-
-		cm.updateConnectionState(conn, packet, (srcIP == origH))
-		return conn
+	} else {
+		conn = value.(*Connection)
+		if nowSec > conn.lastSeen {
+			conn.lastSeen = nowSec
+			conn.duration = conn.lastSeen - conn.startTime
+		}
 	}
 
-	conn := value.(*Connection)
-	if nowSec > conn.lastSeen {
-		conn.lastSeen = nowSec
-	}
-	// *** Guard: only update if this packet is newer than the last processed packet ***
-	if nowSec <= conn.lastPacketTS {
-		return conn
-	}
-	conn.lastPacketTS = nowSec
+	// Update connection state and service
 	cm.updateConnectionState(conn, packet, (srcIP == conn.origH))
+	if conn.service == "" {
+		conn.service = DetectServiceForConnection(conn, packet)
+	}
+
 	return conn
 }
 
-// updateConnectionState: collect stats and update flags
+// updateConnectionState: collect stats and update flags.
 func (cm *ConnectionManager) updateConnectionState(conn *Connection, packet gopacket.Packet, isOrig bool) {
 	atomic.AddUint64(&conn.PacketCount, 1)
 
@@ -198,7 +192,8 @@ func (cm *ConnectionManager) updateConnectionState(conn *Connection, packet gopa
 		return
 	}
 	ip, _ := ipLayer.(*layers.IPv4)
-	ipLen := len(ip.Payload)
+	// Use the total IP packet length (header + payload)
+	ipLen := int(ip.Length)
 
 	if isOrig {
 		conn.origPkts++
@@ -208,10 +203,15 @@ func (cm *ConnectionManager) updateConnectionState(conn *Connection, packet gopa
 		conn.respIPBytes += ipLen
 	}
 
-	// TCP or UDP
+	nowSec := float64(packet.Metadata().Timestamp.UnixNano()) / 1e9
+	productivity := false
+
+	// TCP, UDP, or ICMP processing:
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		tcp, _ := tcpLayer.(*layers.TCP)
-		// Account payload bytes
+		if tcp.SYN || (tcp.SYN && tcp.ACK) || (len(tcp.Payload) > 0) {
+			productivity = true
+		}
 		if isOrig {
 			conn.origBytes += len(tcp.Payload)
 		} else {
@@ -220,24 +220,39 @@ func (cm *ConnectionManager) updateConnectionState(conn *Connection, packet gopa
 		cm.updateTCPState(conn, tcp, isOrig)
 	} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 		udp, _ := udpLayer.(*layers.UDP)
+		if len(udp.Payload) > 0 {
+			productivity = true
+		}
 		if isOrig {
 			conn.origBytes += len(udp.Payload)
 		} else {
 			conn.respBytes += len(udp.Payload)
 		}
 		cm.addHistory(conn, 'D', isOrig)
+	} else if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
+		// For ICMP, mark as productive if there is payload.
+		productive := false
+		if icmp, _ := icmpLayer.(*layers.ICMPv4); icmp != nil {
+			if len(icmp.Payload) > 0 {
+				productive = true
+			}
+		}
+		productivity = productive
+		cm.addHistory(conn, 'D', isOrig)
+	}
+
+	if productivity {
+		conn.productiveTime = nowSec
 	}
 }
 
-// updateTCPState sets flags based on SYN/ACK/FIN/RST
+// updateTCPState sets flags based on SYN/ACK/FIN/RST.
 func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, isOrig bool) {
-	// SYN from originator
 	if tcp.SYN && !tcp.ACK {
 		cm.addHistory(conn, 'S', isOrig)
 		conn.origState = "SYN_SENT"
 		return
 	}
-	// SYN/ACK from responder
 	if tcp.SYN && tcp.ACK && !isOrig {
 		conn.respState = "SYN_RECV"
 		if !conn.seenFirstAck {
@@ -246,23 +261,20 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 		}
 		return
 	}
-	// ACK-only
+	// Pure ACK-only packets (no FIN, no RST, no payload)
 	if tcp.ACK && !tcp.FIN && !tcp.RST && len(tcp.Payload) == 0 {
-		if isOrig {
-			cm.addHistory(conn, 'A', true)
+		// If this ACK comes after a FIN (e.g. within 100 ms) and the last history flag is FIN,
+		// then append an "A" (for final ACK) if not already appended.
+		if tcp.Ack != 0 && len(conn.history) > 0 && conn.history[len(conn.history)-1] == 'F' {
+			// Append an ACK for responder FIN; for originator, similar logic could be applied.
+			cm.addHistory(conn, 'A', isOrig)
 		} else {
-			cm.addHistory(conn, 'A', false) // becomes lowercase
+			cm.addHistory(conn, 'A', isOrig)
 		}
 		return
 	}
-	// Data
 	if len(tcp.Payload) > 0 {
-		if isOrig {
-			cm.addHistory(conn, 'D', true)
-		} else {
-			cm.addHistory(conn, 'D', false)
-		}
-		// Basic http check
+		cm.addHistory(conn, 'D', isOrig)
 		if conn.service == "" {
 			payloadStr := string(tcp.Payload)
 			if strings.HasPrefix(payloadStr, "GET") ||
@@ -273,7 +285,6 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 		}
 		return
 	}
-	// FIN
 	if tcp.FIN {
 		if isOrig {
 			cm.addHistory(conn, 'F', true)
@@ -284,7 +295,6 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 		}
 		return
 	}
-	// RST
 	if tcp.RST {
 		if isOrig {
 			cm.addHistory(conn, 'R', true)
@@ -296,7 +306,7 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 	}
 }
 
-// *** FIX: improved addHistory to prevent endless repeated flags
+// addHistory appends a flag to the connection history string.
 func (cm *ConnectionManager) addHistory(conn *Connection, flag byte, isOrig bool) {
 	// If the first packet from the responder is a FIN, Zeek-style: prepend '^f'
 	if !isOrig && flag == 'F' && len(conn.history) == 0 {
@@ -307,38 +317,45 @@ func (cm *ConnectionManager) addHistory(conn *Connection, flag byte, isOrig bool
 	if isOrig {
 		newFlag = flag
 	} else {
-		// convert uppercase to lowercase for responder
+		// Convert uppercase to lowercase for responder.
 		if flag >= 'A' && flag <= 'Z' {
 			newFlag = flag + 32
 		} else {
 			newFlag = flag
 		}
 	}
-	// If the last character is already the same, skip to avoid repeated letters
+	// Avoid appending the same flag twice in a row.
 	if len(conn.history) > 0 && conn.history[len(conn.history)-1] == newFlag {
 		return
 	}
 	conn.history += string(newFlag)
 }
 
-// Return a Zeek‑like state
+// GetConnState returns a Zeek-like state string based on the connection flags.
+// Improved to return S2/S3 for one-sided FIN events.
 func (cm *ConnectionManager) GetConnState(conn *Connection) string {
+	if conn.protocol == "icmp" {
+		return "OTH"
+	}
 	if conn.protocol == "unknown_transport" {
 		return "OTH"
 	}
 	if conn.origState == "RESET" || conn.respState == "RESET" {
 		return "RSTO"
-	} else if conn.origState == "CLOSED" && conn.respState == "CLOSED" {
+	}
+	if conn.origState == "CLOSED" && conn.respState == "CLOSED" {
 		return "SF"
-	} else if conn.respState == "CLOSED" {
-		// if responder closed, partial close => SHR
+	}
+	if conn.respState == "CLOSED" && conn.origState != "CLOSED" {
 		return "SHR"
-	} else if conn.origState == "CLOSED" {
-		// origin closed, but not responder => S1
-		return "S1"
-	} else if conn.origState == "SYN_SENT" {
+	}
+	if conn.origState == "CLOSED" && conn.respState != "CLOSED" {
+		return "SH"
+	}
+	if conn.origState == "SYN_SENT" {
 		return "S0"
-	} else if conn.seenFirstAck {
+	}
+	if conn.seenFirstAck {
 		return "S1"
 	}
 	return "S0"
@@ -346,15 +363,22 @@ func (cm *ConnectionManager) GetConnState(conn *Connection) string {
 
 func (cm *ConnectionManager) RemoveInactiveConnections() {
 	now := float64(time.Now().UnixNano()) / 1e9
-	timeoutSeconds := float64(cm.timeout) / float64(time.Second)
 	cm.connections.Range(func(key, value interface{}) bool {
 		conn := value.(*Connection)
+		// Use different timeouts for UDP/ICMP versus TCP.
+		var timeoutSeconds float64
+		switch conn.protocol {
+		case "udp", "icmp":
+			timeoutSeconds = 10.0 // 10 seconds inactivity for UDP and ICMP flows.
+		default:
+			timeoutSeconds = float64(cm.timeout) / float64(time.Second) // e.g., 300 seconds for TCP.
+		}
 		if now-conn.lastSeen > timeoutSeconds {
-			// The connection is considered done. Finalize and log if terminal.
+			// Finalize and log the connection.
 			cm.FinalizeConnection(conn)
 			state := cm.GetConnState(conn)
+			// Only log if the connection is not in early states.
 			if !conn.logged && state != "S0" && state != "S1" {
-				// Now we do the actual logging here, so we can capture final ACK
 				logConn(conn, state)
 				conn.logged = true
 			}
@@ -367,16 +391,15 @@ func (cm *ConnectionManager) RemoveInactiveConnections() {
 	})
 }
 
-// Just finalize the duration
+// FinalizeConnection computes the connection duration.
 func (cm *ConnectionManager) FinalizeConnection(conn *Connection) {
-	if conn.startTime > 0 && conn.lastSeen > conn.startTime {
-		conn.duration = conn.lastSeen - conn.startTime
+	if conn.startTime > 0 && conn.productiveTime > conn.startTime {
+		conn.duration = conn.productiveTime - conn.startTime
 	}
 }
 
-// Example minimal logger: you can adapt this to your ConnLogStrategy code
+// logConn is a minimal logger for a finalized connection.
 func logConn(conn *Connection, state string) {
-	// This is just a placeholder showing how you might log
 	if verbose {
 		log.Printf("[FINAL] uid=%s history=%s duration=%.6f state=%s\n",
 			conn.uid, conn.history, conn.duration, state)

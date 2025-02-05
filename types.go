@@ -18,57 +18,62 @@ type PacketEvent struct {
 }
 
 type ConnLog struct {
-	Timestamp     string   `json:"ts"`
-	Uid           string   `json:"uid"`
-	OrigH         string   `json:"id.orig_h"`
-	OrigP         uint16   `json:"id.orig_p"`
-	RespH         string   `json:"id.resp_h"`
-	RespP         uint16   `json:"id.resp_p"`
-	Proto         string   `json:"proto"`
-	Service       string   `json:"service,omitempty"`
-	Duration      float64  `json:"duration,omitempty"`
-	OrigBytes     int      `json:"orig_bytes,omitempty"`
-	RespBytes     int      `json:"resp_bytes,omitempty"`
-	ConnState     string   `json:"conn_state,omitempty"`
-	LocalOrig     bool     `json:"local_orig,omitempty"`
-	LocalResp     bool     `json:"local_resp,omitempty"`
-	MissedBytes   int      `json:"missed_bytes,omitempty"`
-	History       string   `json:"history,omitempty"`
-	OrigPkts      int      `json:"orig_pkts,omitempty"`
-	OrigIPBytes   int      `json:"orig_ip_bytes,omitempty"`
-	RespPkts      int      `json:"resp_pkts,omitempty"`
-	RespIPBytes   int      `json:"resp_ip_bytes,omitempty"`
-	TunnelParents []string `json:"tunnel_parents,omitempty"`
-	OrigL2Addr    string   `json:"orig_l2_addr,omitempty"`
-	RespL2Addr    string   `json:"resp_l2_addr,omitempty"`
-	Vlan          int      `json:"vlan,omitempty"`
-	InnerVlan     int      `json:"inner_vlan,omitempty"`
-	PacketCount   uint64   `json:"packet_count"`
-	IPProto       int      `json:"ip_proto"`
+	Timestamp     string  `json:"ts"`
+	Uid           string  `json:"uid"`
+	OrigH         string  `json:"id.orig_h"`
+	OrigP         uint16  `json:"id.orig_p"`
+	RespH         string  `json:"id.resp_h"`
+	RespP         uint16  `json:"id.resp_p"`
+	Proto         string  `json:"proto"`
+	Service       string  `json:"service,omitempty"`
+	Duration      float64 `json:"duration,omitempty"`
+	OrigBytes     int     `json:"orig_bytes,omitempty"`
+	RespBytes     int     `json:"resp_bytes,omitempty"`
+	ConnState     string  `json:"conn_state,omitempty"`
+	LocalOrig     string  `json:"local_orig,omitempty"`
+	LocalResp     string  `json:"local_resp,omitempty"`
+	MissedBytes   int     `json:"missed_bytes,omitempty"`
+	History       string  `json:"history,omitempty"`
+	OrigPkts      int     `json:"orig_pkts,omitempty"`
+	OrigIPBytes   int     `json:"orig_ip_bytes,omitempty"`
+	RespPkts      int     `json:"resp_pkts,omitempty"`
+	RespIPBytes   int     `json:"resp_ip_bytes,omitempty"`
+	TunnelParents string  `json:"tunnel_parents,omitempty"`
+	OrigL2Addr    string  `json:"orig_l2_addr,omitempty"`
+	RespL2Addr    string  `json:"resp_l2_addr,omitempty"`
+	Vlan          int     `json:"vlan,omitempty"`
+	InnerVlan     int     `json:"inner_vlan,omitempty"`
+	PacketCount   uint64  `json:"packet_count"`
+	IPProto       int     `json:"ip_proto"`
 }
 
 // DNSLog represents a DNS log entry.
 type DNSLog struct {
-	Timestamp string   `json:"ts"`
-	Uid       string   `json:"uid"`
-	SessionID string   `json:"session_id"`
-	OrigH     string   `json:"id.orig_h"`
-	OrigP     uint16   `json:"id.orig_p"`
-	RespH     string   `json:"id.resp_h"`
-	RespP     uint16   `json:"id.resp_p"`
-	Proto     string   `json:"proto"`
-	TransID   uint16   `json:"trans_id"`
-	Query     string   `json:"query,omitempty"`
-	RCode     uint16   `json:"rcode"`
-	RCodeName string   `json:"rcode_name"`
-	AA        bool     `json:"AA"`
-	TC        bool     `json:"TC"`
-	RD        bool     `json:"RD"`
-	RA        bool     `json:"RA"`
-	Z         uint8    `json:"Z"`
-	Answers   []string `json:"answers,omitempty"`
-	TTLs      []uint32 `json:"TTLs,omitempty"`
-	Rejected  bool     `json:"rejected"`
+	Timestamp  string   `json:"ts"`
+	Uid        string   `json:"uid"`
+	SessionID  string   `json:"session_id"`
+	OrigH      string   `json:"id.orig_h"`
+	OrigP      uint16   `json:"id.orig_p"`
+	RespH      string   `json:"id.resp_h"`
+	RespP      uint16   `json:"id.resp_p"`
+	Proto      string   `json:"proto"`
+	TransID    uint16   `json:"trans_id"`
+	Query      string   `json:"query,omitempty"`
+	Rtt        string   `json:"rtt,omitempty"`
+	QClass     uint16   `json:"qclass,omitempty"`
+	QClassName string   `json:"qclass_name,omitempty"`
+	QType      uint16   `json:"qtype,omitempty"`
+	QTypeName  string   `json:"qtype_name,omitempty"`
+	RCode      uint16   `json:"rcode"`
+	RCodeName  string   `json:"rcode_name"`
+	AA         bool     `json:"AA"`
+	TC         bool     `json:"TC"`
+	RD         bool     `json:"RD"`
+	RA         bool     `json:"RA"`
+	Z          uint8    `json:"Z"`
+	Answers    []string `json:"answers,omitempty"`
+	TTLs       []uint32 `json:"TTLs,omitempty"`
+	Rejected   bool     `json:"rejected"`
 }
 
 // HTTPLog represents an HTTP log entry.
@@ -99,7 +104,7 @@ type HTTPLog struct {
 func dnsClassToString(dnsClass layers.DNSClass) string {
 	switch dnsClass {
 	case layers.DNSClassIN:
-		return "IN"
+		return "C_INTERNET"
 	case layers.DNSClassCS:
 		return "CS"
 	case layers.DNSClassCH:
