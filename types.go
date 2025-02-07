@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"time"
 
@@ -9,7 +8,6 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// PacketEvent represents a captured packet event with extended fields.
 type PacketEvent struct {
 	Timestamp time.Time
 	Uid       string
@@ -47,7 +45,6 @@ type ConnLog struct {
 	IPProto       int     `json:"ip_proto"`
 }
 
-// DNSLog represents a DNS log entry.
 type DNSLog struct {
 	Timestamp  string   `json:"ts"`
 	Uid        string   `json:"uid"`
@@ -76,7 +73,6 @@ type DNSLog struct {
 	Rejected   bool     `json:"rejected"`
 }
 
-// HTTPLog represents an HTTP log entry.
 type HTTPLog struct {
 	Timestamp       string   `json:"ts"`
 	Uid             string   `json:"uid"`
@@ -100,7 +96,6 @@ type HTTPLog struct {
 	RespFuids       []string `json:"resp_fuids"`
 }
 
-// Helper functions for DNS translation.
 func dnsClassToString(dnsClass layers.DNSClass) string {
 	switch dnsClass {
 	case layers.DNSClassIN:
@@ -160,25 +155,16 @@ func dnsResponseCodeToString(dnsRCode layers.DNSResponseCode) string {
 	}
 }
 
-func createLogFiles(baseDir string) (map[string]*os.File, error) {
-	logs := make(map[string]*os.File)
-
-	// Define the log file names
+func createLogFiles(baseDir string) (map[string]string, error) {
+	logs := make(map[string]string)
 	logFileNames := map[string]string{
 		"conn": "conn.log",
 		"dns":  "dns.log",
 		"http": "http.log",
 	}
-
 	for logType, fileName := range logFileNames {
 		logFilePath := filepath.Join(baseDir, fileName)
-		// Create or open the log file directly in the base directory
-		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, err
-		}
-		logs[logType] = logFile
+		logs[logType] = logFilePath
 	}
-
 	return logs, nil
 }
