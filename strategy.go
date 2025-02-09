@@ -1,9 +1,11 @@
+// strategy.go
 package main
 
 import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/google/gopacket"
 	"io"
 	"log"
 	"net/http"
@@ -21,7 +23,7 @@ type LogStrategy interface {
 	Close()
 }
 
-// BaseLogger now uses lumberjack for log rotation.
+// BaseLogger uses lumberjack for log rotation.
 type BaseLogger struct {
 	closer io.WriteCloser
 	writer *bufio.Writer
@@ -29,7 +31,6 @@ type BaseLogger struct {
 }
 
 func NewBaseLogger(filePath string, flushInterval time.Duration) *BaseLogger {
-	// Print file path where to write the log.
 	fmt.Println("Writing to file:", filePath)
 	ljLogger := &lumberjack.Logger{
 		Filename:   filePath,
@@ -67,8 +68,7 @@ func (b *BaseLogger) Close() {
 	}
 }
 
-//---------------- ConnLogStrategy ----------------//
-
+// ConnLogStrategy logs connection events.
 type ConnLogStrategy struct {
 	*BaseLogger
 	connManager  *ConnectionManager
@@ -89,15 +89,16 @@ func (logger *ConnLogStrategy) Log(event PacketEvent) {
 		return
 	}
 	state := logger.connManager.GetConnState(conn)
-	if conn.protocol == "udp" || conn.protocol == "icmp" || conn.protocol == "igmp" {
-		if !conn.logged {
+	// For TCP, log if state is not S0 (i.e. handshake complete and/or data exists)
+	if conn.protocol == "tcp" {
+		if state != "S0" && !conn.logged {
 			logger.logConnection(conn, state)
 			conn.logged = true
 		}
-		return
 	}
-	if conn.protocol == "tcp" {
-		if state != "S0" && state != "S1" && !conn.logged {
+	// For other protocols, log immediately.
+	if conn.protocol == "udp" || conn.protocol == "icmp" || conn.protocol == "igmp" {
+		if !conn.logged {
 			logger.logConnection(conn, state)
 			conn.logged = true
 		}
@@ -152,6 +153,9 @@ func (logger *ConnLogStrategy) logConnection(conn *Connection, state string) {
 	logger.lock.Lock()
 	logger.writer.WriteString(logString + "\n")
 	logger.lock.Unlock()
+	if verbose {
+		log.Printf("Logged connection: %s", logString)
+	}
 }
 
 func (logger *ConnLogStrategy) formatPlainLog(connLog ConnLog) string {
@@ -209,8 +213,6 @@ func (logger *ConnLogStrategy) Close() {
 	logger.BaseLogger.Close()
 }
 
-//---------------- DNSLogStrategy ----------------//
-
 type DNSLogStrategy struct {
 	*BaseLogger
 	outputFormat   string
@@ -229,11 +231,40 @@ func NewDNSLogStrategy(filePath string, flushInterval int, outputFormat string) 
 }
 
 func (logger *DNSLogStrategy) Log(event PacketEvent) {
+	if verbose {
+		log.Printf("[%.6f] [Processing packet in DNSLogStrategy] Uid: %s\n",
+			(float64(event.Timestamp.UnixNano()) / 1e9),
+			event.Uid)
+	}
 	dnsLayer := event.Packet.Layer(layers.LayerTypeDNS)
 	if dnsLayer == nil {
+		if udpLayer := event.Packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+			udp, _ := udpLayer.(*layers.UDP)
+			// Check if either source or destination port is 5353 or 5355.
+			if udp.SrcPort == 5353 || udp.DstPort == 5353 || udp.SrcPort == 5355 || udp.DstPort == 5355 {
+				// Attempt to decode the UDP payload as a DNS layer.
+				var dns layers.DNS
+				err := dns.DecodeFromBytes(udp.Payload, gopacket.NilDecodeFeedback)
+				if err != nil {
+					log.Printf("[%.6f] [DNS decode failed] Uid: %s Error: %v\n",
+						float64(event.Timestamp.UnixNano())/1e9, event.Uid, err)
+					return
+				}
+				// If decoding was successful, assign dnsLayer.
+				dnsLayer = &dns
+			}
+		}
+	}
+
+	// If still no DNS layer is found, skip processing.
+	if dnsLayer == nil {
+		log.Printf("[%.6f] [Processing packet in DNSLogStrategy] Uid: %s Skipped\n",
+			float64(event.Timestamp.UnixNano())/1e9, event.Uid)
 		return
 	}
+
 	dns, _ := dnsLayer.(*layers.DNS)
+
 	var srcPort, dstPort uint16
 	var proto string
 	if tcpLayer := event.Packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
@@ -247,27 +278,39 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		dstPort = uint16(udp.DstPort)
 		proto = "udp"
 	}
-	key := event.SessionID
-	logger.qsLock.Lock()
-	if logger.loggedSessions[key] {
-		logger.qsLock.Unlock()
-		return
+
+	// Build a composite key from SessionID and DNS transaction ID.
+	key := event.SessionID + fmt.Sprintf("-%d", dns.ID)
+
+	// For multicast DNS or similar (ports 5353 and 5355), append the packet timestamp (nanosecond resolution)
+	// so that each packet gets a unique key.
+	if srcPort == 5353 || dstPort == 5353 || srcPort == 5355 || dstPort == 5355 {
+		key = key + fmt.Sprintf("-%d", event.Timestamp.UnixNano())
 	}
-	isMDNS := (srcPort == 5353 || dstPort == 5353)
-	if !dns.QR && !isMDNS {
+
+	// print the event that is being processed
+	if verbose {
+		log.Printf("[%.6f] [Processing packet in DNSLogStrategy] key: %s, DNS: %v",
+			(float64(event.Timestamp.UnixNano()) / 1e9), key, dns)
+	}
+
+	logger.qsLock.Lock()
+	// Store queries for later RTT computation.
+	if !dns.QR {
+		// Store the query under the composite key.
 		if _, exists := logger.queries[key]; !exists {
 			logger.queries[key] = event.Timestamp
 		}
 		logger.qsLock.Unlock()
 		return
 	}
+
+	// At this point, we have a response.
 	var rttStr string = "-"
-	if dns.QR {
-		if ts, found := logger.queries[key]; found {
-			rttSec := event.Timestamp.Sub(ts).Seconds()
-			rttStr = fmt.Sprintf("%.6f", rttSec)
-			delete(logger.queries, key)
-		}
+	if ts, found := logger.queries[key]; found {
+		rttSec := event.Timestamp.Sub(ts).Seconds()
+		rttStr = fmt.Sprintf("%.6f", rttSec)
+		delete(logger.queries, key)
 	}
 	logger.loggedSessions[key] = true
 	logger.qsLock.Unlock()
@@ -282,6 +325,7 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		srcIP = ip.SrcIP.String()
 		dstIP = ip.DstIP.String()
 	}
+
 	var dnsQuery string
 	var qclass uint16 = 0
 	var qclassName string = "-"
@@ -295,6 +339,7 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		qtype = uint16(question.Type)
 		qtypeName = dnsTypeToString(question.Type)
 	}
+
 	var origH, respH string
 	var origPort, respPort uint16
 	if dns.QR {
@@ -308,6 +353,7 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		respH = dstIP
 		respPort = dstPort
 	}
+
 	logEntry := DNSLog{
 		Timestamp:  fmt.Sprintf("%.6f", float64(event.Timestamp.UnixNano())/1e9),
 		Uid:        event.Uid,

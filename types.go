@@ -37,11 +37,6 @@ type ConnLog struct {
 	RespPkts      int     `json:"resp_pkts,omitempty"`
 	RespIPBytes   int     `json:"resp_ip_bytes,omitempty"`
 	TunnelParents string  `json:"tunnel_parents,omitempty"`
-	OrigL2Addr    string  `json:"orig_l2_addr,omitempty"`
-	RespL2Addr    string  `json:"resp_l2_addr,omitempty"`
-	Vlan          int     `json:"vlan,omitempty"`
-	InnerVlan     int     `json:"inner_vlan,omitempty"`
-	PacketCount   uint64  `json:"packet_count"`
 	IPProto       int     `json:"ip_proto"`
 }
 

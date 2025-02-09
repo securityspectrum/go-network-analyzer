@@ -67,10 +67,10 @@ func detectTCPProtocol(payload []byte, srcPort, dstPort layers.TCPPort) string {
 
 func detectUDPProtocol(payload []byte, srcPort, dstPort layers.UDPPort) string {
 	if detectDNS(payload) {
-		return "DNS"
+		return "dns" // always lowercase for consistency
 	}
 	if detectDHCP(payload) {
-		return "DHCP"
+		return "dhcp"
 	}
 	// Add more UDP protocol detections here
 	return "unknown"
@@ -113,8 +113,20 @@ func detectSMTP(data []byte) bool {
 }
 
 func detectDNS(data []byte) bool {
-	return len(data) >= 12 &&
-		(data[2]&0x80 == 0 || data[2]&0x80 == 0x80)
+	// Check that we have a DNS header length.
+	if len(data) < 12 {
+		return false
+	}
+	// In a DNS header:
+	// - Bytes 0-1: Transaction ID (any value)
+	// - Byte 2: Flags high; the first 4 bits are opcode (should be <= 15)
+	opcode := (data[2] >> 3) & 0x0F
+	if opcode > 15 {
+		return false
+	}
+	// Optionally, check that QDCOUNT (bytes 4-5) is nonzero.
+	qdCount := uint16(data[4])<<8 | uint16(data[5])
+	return qdCount > 0
 }
 
 func detectDHCP(data []byte) bool {
@@ -123,23 +135,6 @@ func detectDHCP(data []byte) bool {
 		data[1] == 0x01 && // Ethernet hardware type
 		data[2] == 0x06 && // Hardware address length
 		data[3] == 0x00 // Hops
-}
-
-// Add more protocol detection functions as needed
-
-func detectService(conn *Connection) {
-	// Port-based detection
-	switch conn.respP {
-	case 80, 8080:
-		conn.service = "http"
-	case 443:
-		conn.service = "ssl"
-	case 53:
-		conn.service = "dns"
-	// Add more ports as needed
-	default:
-		conn.service = ""
-	}
 }
 
 func DetectServiceForConnection(conn *Connection, packet gopacket.Packet) string {

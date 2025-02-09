@@ -1,18 +1,18 @@
+// capture.go
 package main
 
 import (
 	"fmt"
+	"github.com/google/gopacket/layers"
 	"log"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
-// runCapture starts live packet capture and returns the logging context.
 func runCapture(deviceName, logDir string, flushInterval int, stopChan chan struct{}) *LogContext {
 	// Ensure log directory exists.
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
@@ -27,7 +27,7 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 		log.Fatalf("Failed to create log files: %v", err)
 	}
 
-	// Use configurable timeouts (e.g. TCP: connectionTimeout, UDP/ICMP: 15 seconds)
+	// Create connection manager with configurable timeouts.
 	connManager := NewConnectionManager(connectionTimeout, 15*time.Second, 15*time.Second)
 	context := NewLogContext()
 	context.AddStrategy("conn", NewConnLogStrategy(logFiles["conn"], connManager, flushInterval, outputFormat))
@@ -38,7 +38,7 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 	wg.Add(1)
 	go capturePackets(deviceName, context, &wg, stopChan)
 
-	// Periodically clean up inactive connections.
+	// Periodically remove inactive connections.
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range ticker.C {
@@ -49,12 +49,11 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 	wg.Wait()
 	ticker.Stop()
 
-	// IMPORTANT: Close the logging context so that buffers are flushed
+	// Flush logs.
 	context.Close()
 	return context
 }
 
-// capturePackets performs live packet capture.
 func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, stopChan chan struct{}) {
 	defer wg.Done()
 	handle, err := pcap.OpenLive(deviceName, 1600, true, pcap.BlockForever)
@@ -64,9 +63,7 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 	}
 	defer handle.Close()
 
-	if verbose {
-		log.Printf("Starting packet capture on device %s...\n", deviceName)
-	}
+	log.Printf("Starting packet capture on device %s...", deviceName)
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for {
 		select {
@@ -79,10 +76,7 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 			}
 			sessionID := generateSessionID(packet)
 			uid := generateUID(packet)
-			if verbose {
-				log.Printf("Captured packet with UID: %s, SessionID: %s\n", uid, sessionID)
-			}
-			// *** Un-commented the call to context.Log so that the packet event is processed ***
+			log.Printf("Captured packet with UID: %s, SessionID: %s", uid, sessionID)
 			context.Log(PacketEvent{
 				Timestamp: packet.Metadata().Timestamp,
 				Uid:       uid,
@@ -93,7 +87,7 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 	}
 }
 
-func processPcapFile(filename string, logDir string, flushInterval int, outputFormat string) (*LogContext, error) {
+func processPcapFile(filename, logDir string, flushInterval int, outputFormat string) (*LogContext, error) {
 	handle, err := pcap.OpenOffline(filename)
 	if err != nil {
 		return nil, fmt.Errorf("error opening pcap file: %v", err)
@@ -105,11 +99,10 @@ func processPcapFile(filename string, logDir string, flushInterval int, outputFo
 		return nil, fmt.Errorf("error creating log files: %v", err)
 	}
 
-	// Use configurable timeouts.
-	connectionManager := NewConnectionManager(5*time.Minute, 15*time.Second, 15*time.Second)
+	connManager := NewConnectionManager(5*time.Minute, 15*time.Second, 15*time.Second)
 	context := NewLogContext()
 
-	connLogStrategy := NewConnLogStrategy(logFiles["conn"], connectionManager, flushInterval, outputFormat)
+	connLogStrategy := NewConnLogStrategy(logFiles["conn"], connManager, flushInterval, outputFormat)
 	dnsLogStrategy := NewDNSLogStrategy(logFiles["dns"], flushInterval, outputFormat)
 	httpLogStrategy := NewHTTPLogStrategy(logFiles["http"], flushInterval, outputFormat)
 
@@ -125,16 +118,11 @@ func processPcapFile(filename string, logDir string, flushInterval int, outputFo
 			Uid:       generateUID(packet),
 			SessionID: generateSessionID(packet),
 		}
-		//connectionManager.UpdateConnection(event)
+		// processing flow information (4 or 5 tuple) for each packet
 		context.Log(event)
 	}
-	// Force removal of inactive connections to trigger logging of pending flows.
-	connectionManager.RemoveInactiveConnections()
-
-	if verbose {
-		log.Println("Finished processing PCAP file")
-	}
-	// Close the logging context to flush buffered data.
+	connManager.RemoveInactiveConnections()
+	log.Println("Finished processing PCAP file")
 	context.Close()
 	return context, nil
 }
