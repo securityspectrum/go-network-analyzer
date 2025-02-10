@@ -66,13 +66,17 @@ func detectTCPProtocol(payload []byte, srcPort, dstPort layers.TCPPort) string {
 }
 
 func detectUDPProtocol(payload []byte, srcPort, dstPort layers.UDPPort) string {
-	if detectDNS(payload) {
-		return "dns" // always lowercase for consistency
+	// Check known DNS ports.
+	if srcPort == 53 || dstPort == 53 ||
+		srcPort == 5353 || dstPort == 5353 ||
+		srcPort == 5355 || dstPort == 5355 {
+		if detectDNS(payload) {
+			return "dns"
+		}
 	}
 	if detectDHCP(payload) {
 		return "dhcp"
 	}
-	// Add more UDP protocol detections here
 	return "unknown"
 }
 

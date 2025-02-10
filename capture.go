@@ -34,6 +34,14 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 	context.AddStrategy("dns", NewDNSLogStrategy(logFiles["dns"], flushInterval, outputFormat))
 	context.AddStrategy("http", NewHTTPLogStrategy(logFiles["http"], flushInterval, outputFormat))
 
+	// Start the DNS query expiration routine.
+	// Retrieve the DNS log strategy from the strategies map.
+	if dnsStrat, ok := context.strategies["dns"].(*DNSLogStrategy); ok {
+		go dnsStrat.ExpireQueries(1 * time.Second)
+	} else {
+		log.Printf("DNS log strategy not found for query expiration")
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go capturePackets(deviceName, context, &wg, stopChan)
@@ -110,6 +118,14 @@ func processPcapFile(filename, logDir string, flushInterval int, outputFormat st
 	context.AddStrategy("dns", dnsLogStrategy)
 	context.AddStrategy("http", httpLogStrategy)
 
+	// Start the DNS query expiration routine.
+	// Retrieve the DNS log strategy from the strategies map.
+	if dnsStrat, ok := context.strategies["dns"].(*DNSLogStrategy); ok {
+		go dnsStrat.ExpireQueries(1 * time.Second)
+	} else {
+		log.Printf("DNS log strategy not found for query expiration")
+	}
+
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
 		event := PacketEvent{
@@ -123,6 +139,7 @@ func processPcapFile(filename, logDir string, flushInterval int, outputFormat st
 	}
 	connManager.RemoveInactiveConnections()
 	log.Println("Finished processing PCAP file")
+	// Flush logs (this will now flush pending DNS queries).
 	context.Close()
 	return context, nil
 }
