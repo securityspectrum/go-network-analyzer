@@ -83,19 +83,10 @@ func runApplication(stopChan chan struct{}) {
 		return
 	}
 
-	// If the interface flag is provided, it overrides the config
-	if interfaceName != "" {
-		log.Printf("Using specified network interface: %s", interfaceName)
-		config.SelectedInterface = interfaceName
-	} else if config.SelectedInterface != "" {
-		log.Printf("Using configured network interface: %s", config.SelectedInterface)
-	} else {
-		log.Fatalf("No network interface specified or configured.")
-	}
-
 	var context *LogContext
 
 	if pcapFile != "" {
+		log.Printf("Processing PCAP file: %s", pcapFile)
 		// Process PCAP file
 		context, err = processPcapFile(pcapFile, config.LogDir, config.FlushInterval, outputFormat)
 		if err != nil {
@@ -106,6 +97,15 @@ func runApplication(stopChan chan struct{}) {
 		fmt.Println("Finished processing PCAP file")
 		return
 	} else {
+		// If the interface flag is provided, it overrides the config
+		if interfaceName != "" {
+			log.Printf("Using specified network interface: %s", interfaceName)
+			config.SelectedInterface = interfaceName
+		} else if config.SelectedInterface != "" {
+			log.Printf("Using configured network interface: %s", config.SelectedInterface)
+		} else {
+			log.Fatalf("No network interface specified or configured.")
+		}
 		// Live capture
 		context = runCapture(config.SelectedInterface, config.LogDir, config.FlushInterval, stopChan)
 	}

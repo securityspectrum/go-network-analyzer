@@ -91,6 +91,32 @@ type HTTPLog struct {
 	RespFuids       []string `json:"resp_fuids"`
 }
 
+// HTTPTransaction holds the request and response information for one HTTP transaction.
+type HTTPTransaction struct {
+	// Common fields.
+	Timestamp time.Time // the time of the request
+	Uid       string
+	SessionID string
+	// Addresses and ports.
+	OrigH      string
+	OrigP      uint16
+	RespH      string
+	RespP      uint16
+	TransDepth int
+	// Request fields.
+	Method         string
+	Host           string
+	URI            string
+	UserAgent      string
+	Version        string
+	RequestBodyLen int
+	// Response fields.
+	ResponseBodyLen int
+	StatusCode      int
+	StatusMsg       string
+	// (Other fields such as tags or fuids could be added later.)
+}
+
 func dnsClassToString(dnsClass uint16) string {
 	switch dnsClass {
 	case 1:

@@ -132,6 +132,8 @@ func processPcapFile(filename, logDir string, flushInterval int, outputFormat st
 		log.Printf("DNS log strategy not found for query expiration")
 	}
 
+	log.Println("Processing PCAP file...")
+
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
 		event := PacketEvent{

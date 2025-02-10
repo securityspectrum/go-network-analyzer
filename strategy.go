@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,14 @@ type BaseLogger struct {
 }
 
 func NewBaseLogger(filePath string, flushInterval time.Duration) *BaseLogger {
+	dir := filepath.Dir(filePath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			// do not return, just log the rerror
+			log.Printf("Failed to create log directory: %v", err)
+		}
+	}
+
 	fmt.Println("Writing to file:", filePath)
 	ljLogger := &lumberjack.Logger{
 		Filename:   filePath,
@@ -88,34 +98,45 @@ type ConnLogStrategy struct {
 	outputFormat string
 }
 
+func (logger *ConnLogStrategy) finalizeCallback(conn *Connection, state string) {
+	// Only log if not already logged
+	if !conn.logged {
+		logger.logConnection(conn, state)
+		conn.logged = true
+	}
+}
+
 func NewConnLogStrategy(filePath string, connManager *ConnectionManager, flushInterval int, outputFormat string) *ConnLogStrategy {
-	return &ConnLogStrategy{
+	logger := &ConnLogStrategy{
 		BaseLogger:   NewBaseLogger(filePath, time.Duration(flushInterval)*time.Second),
 		connManager:  connManager,
 		outputFormat: outputFormat,
 	}
+	// Set the connection manager’s finalize callback to our method.
+	connManager.finalizeCallback = logger.finalizeCallback
+	return logger
 }
 
 func (logger *ConnLogStrategy) Log(event PacketEvent) {
-	conn := logger.connManager.UpdateConnection(event)
-	if conn == nil {
-		return
-	}
-	state := logger.connManager.GetConnState(conn)
-	// For TCP, log if state is not S0.
-	if conn.protocol == "tcp" {
-		if state != "S0" && !conn.logged {
-			logger.logConnection(conn, state)
-			conn.logged = true
-		}
-	}
-	// For other protocols, log immediately.
-	if conn.protocol == "udp" || conn.protocol == "icmp" || conn.protocol == "igmp" {
-		if !conn.logged {
-			logger.logConnection(conn, state)
-			conn.logged = true
-		}
-	}
+	_ = logger.connManager.UpdateConnection(event)
+	//if conn == nil {
+	//	return
+	//}
+	//state := logger.connManager.GetConnState(conn)
+	//// For TCP, log if state is not S0.
+	//if conn.protocol == "tcp" {
+	//	if state != "S0" && !conn.logged {
+	//		logger.logConnection(conn, state)
+	//		conn.logged = true
+	//	}
+	//}
+	//// For other protocols, log immediately.
+	//if conn.protocol == "udp" || conn.protocol == "icmp" || conn.protocol == "igmp" {
+	//	if !conn.logged {
+	//		logger.logConnection(conn, state)
+	//		conn.logged = true
+	//	}
+	//}
 }
 
 func (logger *ConnLogStrategy) logConnection(conn *Connection, state string) {
@@ -223,6 +244,16 @@ func (logger *ConnLogStrategy) formatPlainLog(connLog ConnLog) string {
 }
 
 func (logger *ConnLogStrategy) Close() {
+	// Log any connections that have not yet been finalized.
+	logger.connManager.connections.Range(func(key, value interface{}) bool {
+		conn := value.(*Connection)
+		if !conn.logged {
+			state := logger.connManager.GetConnState(conn)
+			logger.logConnection(conn, state)
+			conn.logged = true
+		}
+		return true
+	})
 	logger.BaseLogger.Close()
 }
 
@@ -651,12 +682,16 @@ func (logger *DNSLogStrategy) Close() {
 type HTTPLogStrategy struct {
 	*BaseLogger
 	outputFormat string
+	// Map of pending HTTP transactions, keyed by SessionID.
+	httpTransactions map[string]*HTTPTransaction
+	txLock           sync.Mutex
 }
 
 func NewHTTPLogStrategy(filePath string, flushInterval int, outputFormat string) *HTTPLogStrategy {
 	return &HTTPLogStrategy{
-		BaseLogger:   NewBaseLogger(filePath, time.Duration(flushInterval)*time.Second),
-		outputFormat: outputFormat,
+		BaseLogger:       NewBaseLogger(filePath, time.Duration(flushInterval)*time.Second),
+		outputFormat:     outputFormat,
+		httpTransactions: make(map[string]*HTTPTransaction),
 	}
 }
 
@@ -689,77 +724,81 @@ func parseHTTPResponse(payload []byte) (statusCode int, statusMsg string, respon
 	return
 }
 
-func (logger *HTTPLogStrategy) Log(event PacketEvent) {
-	var srcIP, dstIP, proto string
-	var srcPort, dstPort uint16
-	var httpMethod, httpHost, httpURI, httpUserAgent, httpVersion string
-	var transDepth, requestBodyLen, responseBodyLen, statusCode int
-	var statusMsg string
-	var tags, respFuids []string
-
-	if ipLayer := event.Packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+func extractSrcIP(packet gopacket.Packet) string {
+	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
-		srcIP = ip.SrcIP.String()
-		dstIP = ip.DstIP.String()
-		proto = ip.Protocol.String()
-	} else if ipLayer := event.Packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
+		return ip.SrcIP.String()
+	} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv6)
-		srcIP = ip.SrcIP.String()
-		dstIP = ip.DstIP.String()
-		proto = "ipv6"
+		return ip.SrcIP.String()
 	}
-	if tcpLayer := event.Packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		tcp, _ := tcpLayer.(*layers.TCP)
-		srcPort = uint16(tcp.SrcPort)
-		dstPort = uint16(tcp.DstPort)
-		proto = "tcp"
-	} else if udpLayer := event.Packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
-		udp, _ := udpLayer.(*layers.UDP)
-		srcPort = uint16(udp.SrcPort)
-		dstPort = uint16(udp.DstPort)
-		proto = "udp"
-	}
-	if appLayer := event.Packet.ApplicationLayer(); appLayer != nil {
-		payload := appLayer.Payload()
-		if isHTTPRequest(payload) {
-			httpMethod, httpHost, httpURI, httpUserAgent, httpVersion, requestBodyLen = parseHTTPRequest(payload)
-		} else if isHTTPResponse(payload) {
-			statusCode, statusMsg, responseBodyLen = parseHTTPResponse(payload)
-		}
-	}
-	if httpMethod == "" && statusCode == 0 {
-		return
-	}
+	return ""
+}
 
-	logEntry := HTTPLog{
-		Timestamp:       event.Timestamp.Format(time.RFC3339),
-		Uid:             event.Uid,
-		SessionID:       event.SessionID,
-		OrigH:           srcIP,
-		OrigP:           srcPort,
-		RespH:           dstIP,
-		RespP:           dstPort,
-		Proto:           proto,
-		TransDepth:      transDepth,
-		Method:          httpMethod,
-		Host:            httpHost,
-		URI:             httpURI,
-		UserAgent:       httpUserAgent,
-		Version:         httpVersion,
-		RequestBodyLen:  requestBodyLen,
-		ResponseBodyLen: responseBodyLen,
-		StatusCode:      statusCode,
-		StatusMsg:       statusMsg,
-		Tags:            tags,
-		RespFuids:       respFuids,
+func extractDstIP(packet gopacket.Packet) string {
+	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+		ip, _ := ipLayer.(*layers.IPv4)
+		return ip.DstIP.String()
+	} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
+		ip, _ := ipLayer.(*layers.IPv6)
+		return ip.DstIP.String()
+	}
+	return ""
+}
+
+func extractSrcPort(packet gopacket.Packet) uint16 {
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp, _ := tcpLayer.(*layers.TCP)
+		return uint16(tcp.SrcPort)
+	} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+		udp, _ := udpLayer.(*layers.UDP)
+		return uint16(udp.SrcPort)
+	}
+	return 0
+}
+
+func extractDstPort(packet gopacket.Packet) uint16 {
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp, _ := tcpLayer.(*layers.TCP)
+		return uint16(tcp.DstPort)
+	} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+		udp, _ := udpLayer.(*layers.UDP)
+		return uint16(udp.DstPort)
+	}
+	return 0
+}
+
+func (logger *HTTPLogStrategy) logHTTPTransaction(tx *HTTPTransaction) {
+	// Build an HTTPLog record from the transaction.
+	httpLog := HTTPLog{
+		Timestamp:       tx.Timestamp.Format(time.RFC3339),
+		Uid:             tx.Uid,
+		SessionID:       tx.SessionID,
+		OrigH:           tx.OrigH,
+		OrigP:           tx.OrigP,
+		RespH:           tx.RespH,
+		RespP:           tx.RespP,
+		Proto:           "tcp", // for HTTP, typically tcp
+		TransDepth:      tx.TransDepth,
+		Method:          tx.Method,
+		Host:            tx.Host,
+		URI:             tx.URI,
+		UserAgent:       tx.UserAgent,
+		Version:         tx.Version,
+		RequestBodyLen:  tx.RequestBodyLen,
+		ResponseBodyLen: tx.ResponseBodyLen,
+		StatusCode:      tx.StatusCode,
+		StatusMsg:       tx.StatusMsg,
+		Tags:            []string{},
+		RespFuids:       []string{},
 	}
 	var logString string
 	if logger.outputFormat == "plain" {
-		logString = logger.formatPlainLog(logEntry)
+		logString = logger.formatPlainLog(httpLog)
 	} else {
-		data, err := json.Marshal(logEntry)
+		data, err := json.Marshal(httpLog)
 		if err != nil {
-			log.Println("Error encoding HTTP JSON:", err)
+			log.Printf("Error encoding HTTP JSON: %v", err)
 			return
 		}
 		logString = string(data)
@@ -772,29 +811,100 @@ func (logger *HTTPLogStrategy) Log(event PacketEvent) {
 	}
 }
 
+func (logger *HTTPLogStrategy) Log(event PacketEvent) {
+	appLayer := event.Packet.ApplicationLayer()
+	if appLayer == nil {
+		return
+	}
+	payload := appLayer.Payload()
+
+	logger.txLock.Lock()
+	defer logger.txLock.Unlock()
+
+	// If the packet is an HTTP request...
+	if isHTTPRequest(payload) {
+		httpMethod, httpHost, httpURI, httpUserAgent, httpVersion, requestBodyLen := parseHTTPRequest(payload)
+		// Create a new transaction record.
+		tx := &HTTPTransaction{
+			Timestamp:      event.Timestamp,
+			Uid:            event.Uid,
+			SessionID:      event.SessionID,
+			OrigH:          extractSrcIP(event.Packet), // assume request comes from the client
+			OrigP:          extractSrcPort(event.Packet),
+			RespH:          extractDstIP(event.Packet),
+			RespP:          extractDstPort(event.Packet),
+			TransDepth:     1,
+			Method:         httpMethod,
+			Host:           httpHost,
+			URI:            httpURI,
+			UserAgent:      httpUserAgent,
+			Version:        httpVersion,
+			RequestBodyLen: requestBodyLen,
+		}
+		logger.httpTransactions[event.SessionID] = tx
+		return
+	}
+
+	// If the packet is an HTTP response...
+	if isHTTPResponse(payload) {
+		statusCode, statusMsg, responseBodyLen := parseHTTPResponse(payload)
+		if tx, exists := logger.httpTransactions[event.SessionID]; exists {
+			tx.ResponseBodyLen = responseBodyLen
+			tx.StatusCode = statusCode
+			tx.StatusMsg = statusMsg
+			logger.logHTTPTransaction(tx)
+			delete(logger.httpTransactions, event.SessionID)
+		} else {
+			// No matching request found: log a partial transaction.
+			tx := &HTTPTransaction{
+				Timestamp:       event.Timestamp,
+				Uid:             event.Uid,
+				SessionID:       event.SessionID,
+				OrigH:           extractDstIP(event.Packet),
+				OrigP:           extractDstPort(event.Packet),
+				RespH:           extractSrcIP(event.Packet),
+				RespP:           extractSrcPort(event.Packet),
+				TransDepth:      1,
+				ResponseBodyLen: responseBodyLen,
+				StatusCode:      statusCode,
+				StatusMsg:       statusMsg,
+			}
+			logger.logHTTPTransaction(tx)
+		}
+	}
+}
+
 func (logger *HTTPLogStrategy) formatPlainLog(httpLog HTTPLog) string {
-	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s",
-		httpLog.Timestamp,        // string
-		httpLog.Uid,              // string
-		httpLog.OrigH,            // string
-		httpLog.OrigP,            // %d
-		httpLog.RespH,            // string
-		httpLog.RespP,            // %d
-		httpLog.Proto,            // string
-		httpLog.TransDepth,       // %d
-		httpLog.Method,           // string
-		httpLog.Host,             // string
-		httpLog.URI,              // string
-		httpLog.Version,          // string
-		httpLog.RequestBodyLen,   // %d
-		httpLog.ResponseBodyLen,  // %d
-		httpLog.StatusCode,       // %d
-		httpLog.StatusMsg,        // string
-		formatTags(httpLog.Tags), // string
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s",
+		httpLog.Timestamp,        // ts
+		httpLog.Uid,              // uid
+		httpLog.OrigH,            // id.orig_h
+		httpLog.OrigP,            // id.orig_p
+		httpLog.RespH,            // id.resp_h
+		httpLog.RespP,            // id.resp_p
+		httpLog.TransDepth,       // trans_depth
+		httpLog.Method,           // method
+		httpLog.Host,             // host
+		httpLog.URI,              // uri
+		httpLog.UserAgent,        // user_agent
+		httpLog.Version,          // version
+		httpLog.RequestBodyLen,   // request_body_len
+		httpLog.ResponseBodyLen,  // response_body_len
+		httpLog.StatusCode,       // status_code
+		httpLog.StatusMsg,        // status_msg
+		formatTags(httpLog.Tags), // tags
+		// (Add more fields as needed to match Zeek’s output)
+		"-",
+		"-",
 	)
 }
 
 func (logger *HTTPLogStrategy) Close() {
+	logger.txLock.Lock()
+	for _, tx := range logger.httpTransactions {
+		logger.logHTTPTransaction(tx)
+	}
+	logger.txLock.Unlock()
 	logger.BaseLogger.Close()
 }
 

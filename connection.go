@@ -90,6 +90,8 @@ type ConnectionManager struct {
 	timeout          time.Duration // TCP inactivity timeout
 	udpTimeout       time.Duration // UDP inactivity timeout
 	icmpTimeout      time.Duration // ICMP inactivity timeout
+	// Callback to log the final connection record when it is being removed.
+	finalizeCallback func(conn *Connection, state string)
 }
 
 func NewConnectionManager(tcpTimeout, udpTimeout, icmpTimeout time.Duration) *ConnectionManager {
@@ -491,7 +493,10 @@ func (cm *ConnectionManager) RemoveInactiveConnections() {
 					conn.protocol, cm.GetConnState(conn), conn.history,
 					duration)
 			}
-			cm.FinalizeConnection(conn)
+			if cm.finalizeCallback != nil {
+				// Log the final connection record using the callback.
+				cm.finalizeCallback(conn, cm.GetConnState(conn))
+			}
 			cm.connections.Delete(key)
 		}
 		return true
