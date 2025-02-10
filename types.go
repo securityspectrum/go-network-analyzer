@@ -50,12 +50,12 @@ type DNSLog struct {
 	RespP      uint16   `json:"id.resp_p"`
 	Proto      string   `json:"proto"`
 	TransID    uint16   `json:"trans_id"`
-	Query      string   `json:"query,omitempty"`
-	Rtt        string   `json:"rtt,omitempty"`
-	QClass     uint16   `json:"qclass,omitempty"`
-	QClassName string   `json:"qclass_name,omitempty"`
-	QType      uint16   `json:"qtype,omitempty"`
-	QTypeName  string   `json:"qtype_name,omitempty"`
+	Rtt        string   `json:"rtt"`
+	Query      string   `json:"query"`
+	QClass     uint16   `json:"qclass"`
+	QClassName string   `json:"qclass_name"`
+	QType      uint16   `json:"qtype"`
+	QTypeName  string   `json:"qtype_name"`
 	RCode      uint16   `json:"rcode"`
 	RCodeName  string   `json:"rcode_name"`
 	AA         bool     `json:"AA"`
@@ -63,8 +63,8 @@ type DNSLog struct {
 	RD         bool     `json:"RD"`
 	RA         bool     `json:"RA"`
 	Z          uint8    `json:"Z"`
-	Answers    []string `json:"answers,omitempty"`
-	TTLs       []uint32 `json:"TTLs,omitempty"`
+	Answers    []string `json:"answers"`
+	TTLs       []uint32 `json:"TTLs"`
 	Rejected   bool     `json:"rejected"`
 }
 
@@ -91,16 +91,18 @@ type HTTPLog struct {
 	RespFuids       []string `json:"resp_fuids"`
 }
 
-func dnsClassToString(dnsClass layers.DNSClass) string {
+func dnsClassToString(dnsClass uint16) string {
 	switch dnsClass {
-	case layers.DNSClassIN:
+	case 1:
 		return "C_INTERNET"
-	case layers.DNSClassCS:
+	case 2:
 		return "CS"
-	case layers.DNSClassCH:
+	case 3:
 		return "CH"
-	case layers.DNSClassHS:
+	case 4:
 		return "HS"
+	case 32769:
+		return "qclass-32769"
 	default:
 		return "UNKNOWN"
 	}

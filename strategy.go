@@ -1,4 +1,3 @@
-// strategy.go
 package main
 
 import (
@@ -16,6 +15,40 @@ import (
 	"github.com/google/gopacket/layers"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+func selectDNSQueryString(questions []layers.DNSQuestion) string {
+	if len(questions) == 0 {
+		return "-"
+	}
+	// Build a slice of question names.
+	var names []string
+	for _, q := range questions {
+		// Remove any trailing nulls and extra whitespace.
+		name := strings.TrimRight(string(q.Name), "\x00")
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "-"
+	}
+	return strings.Join(names, ",")
+}
+
+func selectDNSQuestion(questions []layers.DNSQuestion) layers.DNSQuestion {
+	if len(questions) == 0 {
+		return layers.DNSQuestion{}
+	}
+	// Prefer a PTR question if one exists.
+	for _, q := range questions {
+		if q.Type == layers.DNSTypePTR {
+			return q
+		}
+	}
+	// Fallback: return the last question in the list.
+	return questions[len(questions)-1]
+}
 
 // LogStrategy defines the interface for logging strategies.
 type LogStrategy interface {
@@ -68,7 +101,7 @@ func (b *BaseLogger) Close() {
 	}
 }
 
-// ConnLogStrategy logs connection events.
+// ConnLogStrategy (unchanged)
 type ConnLogStrategy struct {
 	*BaseLogger
 	connManager  *ConnectionManager
@@ -89,7 +122,7 @@ func (logger *ConnLogStrategy) Log(event PacketEvent) {
 		return
 	}
 	state := logger.connManager.GetConnState(conn)
-	// For TCP, log if state is not S0 (i.e. handshake complete and/or data exists)
+	// For TCP, log if state is not S0.
 	if conn.protocol == "tcp" {
 		if state != "S0" && !conn.logged {
 			logger.logConnection(conn, state)
@@ -213,7 +246,6 @@ func (logger *ConnLogStrategy) Close() {
 	logger.BaseLogger.Close()
 }
 
-// QueryInfo holds information about a DNS query.
 type QueryInfo struct {
 	Timestamp time.Time
 	DNS       *layers.DNS
@@ -229,7 +261,7 @@ type QueryInfo struct {
 type DNSLogStrategy struct {
 	*BaseLogger
 	outputFormat   string
-	queries        map[string]QueryInfo // now storing QueryInfo instead of time.Time
+	queries        map[string]QueryInfo // stores a deep copy of DNS info
 	loggedSessions map[string]bool
 	qsLock         sync.Mutex
 }
@@ -241,16 +273,28 @@ func NewDNSLogStrategy(filePath string, flushInterval int, outputFormat string) 
 		queries:        make(map[string]QueryInfo),
 		loggedSessions: make(map[string]bool),
 	}
-	// Start expiration routine
+	// Start the expiration routine
 	go dls.ExpireQueries(5 * time.Second)
 	return dls
 }
 
+// dnsQuestionsToString returns a comma-separated string of all DNS question names.
+func dnsQuestionsToString(questions []layers.DNSQuestion) string {
+	if len(questions) == 0 {
+		return "-"
+	}
+	var qnames []string
+	for _, q := range questions {
+		qnames = append(qnames, string(q.Name))
+	}
+	return strings.Join(qnames, ",")
+}
+
 func (logger *DNSLogStrategy) Log(event PacketEvent) {
-	// Try to get DNS layer.
+	// Try to get the DNS layer.
 	dnsLayer := event.Packet.Layer(layers.LayerTypeDNS)
 	if dnsLayer == nil {
-		// For multicast DNS on known ports, try manual decode.
+		// For known DNS UDP ports, try manual decode.
 		if udpLayer := event.Packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 			udp, _ := udpLayer.(*layers.UDP)
 			if udp.SrcPort == 53 || udp.DstPort == 53 ||
@@ -271,8 +315,8 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 			return
 		}
 	}
-
 	dns, _ := dnsLayer.(*layers.DNS)
+
 	var srcPort, dstPort uint16
 	var proto string
 	if tcpLayer := event.Packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
@@ -297,7 +341,6 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 	logger.qsLock.Lock()
 	// If this is a query (QR == false), store full QueryInfo and return.
 	if !dns.QR {
-		// Also extract source/destination IP addresses.
 		var srcIP, dstIP string
 		if ipLayer := event.Packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 			ip, _ := ipLayer.(*layers.IPv4)
@@ -321,12 +364,13 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		logger.queries[key] = qi
 		logger.qsLock.Unlock()
 		if verbose {
-			log.Printf("[%.6f] [DNSLogStrategy] Stored query, key: %s, Uid: %s", float64(event.Timestamp.UnixNano())/1e9, key, event.Uid)
+			log.Printf("[%.6f] [DNSLogStrategy] Stored query, key: %s, Uid: %s",
+				float64(event.Timestamp.UnixNano())/1e9, key, event.Uid)
 		}
 		return
 	}
 
-	// For responses, try to get the stored QueryInfo.
+	// For responses, retrieve and remove the stored QueryInfo.
 	var rttStr string = "-"
 	var qi QueryInfo
 	if stored, found := logger.queries[key]; found {
@@ -338,7 +382,7 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 	logger.loggedSessions[key] = true
 	logger.qsLock.Unlock()
 
-	// Get IP addresses (if not already from QueryInfo).
+	// Get source/destination IP addresses.
 	var srcIP, dstIP string
 	if qi.SrcIP != "" && qi.DstIP != "" {
 		srcIP = qi.SrcIP
@@ -355,22 +399,21 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		}
 	}
 
-	// Extract query details.
-	var dnsQuery string
-	var qclass uint16 = 0
-	var qclassName string = "-"
-	var qtype uint16 = 0
-	var qtypeName string = "-"
+	// Instead of choosing a single DNS question via a heuristic, we join all questions.
+	dnsQuery := dnsQuestionsToString(dns.Questions)
+	qclass := uint16(0)
+	qtype := uint16(0)
+	qclassName := "-"
+	qtypeName := "-"
 	if len(dns.Questions) > 0 {
-		question := dns.Questions[0]
-		dnsQuery = string(question.Name)
-		qclass = uint16(question.Class)
-		qclassName = dnsClassToString(question.Class)
-		qtype = uint16(question.Type)
-		qtypeName = dnsTypeToString(question.Type)
+		// Use the first question’s class and type.
+		qclass = uint16(dns.Questions[0].Class)
+		qtype = uint16(dns.Questions[0].Type)
+		qclassName = dnsClassToString(qclass)
+		qtypeName = dnsTypeToString(dns.Questions[0].Type)
 	}
 
-	// Determine originator and responder.
+	// Determine originator/responder: for responses, flip IPs.
 	var origH, respH string
 	var origPort, respPort uint16
 	if dns.QR {
@@ -385,7 +428,6 @@ func (logger *DNSLogStrategy) Log(event PacketEvent) {
 		respPort = dstPort
 	}
 
-	// Construct the DNS log record.
 	logEntry := DNSLog{
 		Timestamp:  fmt.Sprintf("%.6f", float64(event.Timestamp.UnixNano())/1e9),
 		Uid:        event.Uid,
@@ -446,22 +488,14 @@ func (logger *DNSLogStrategy) ExpireQueries(expireAfter time.Duration) {
 		now := time.Now()
 		for key, qi := range logger.queries {
 			if now.Sub(qi.Timestamp) > expireAfter {
-				// Build a DNS log record for the unanswered query.
+				// Build a log record for the unanswered query.
 				dns := qi.DNS
-				var dnsQuery string
-				var qclass uint16 = 0
-				var qclassName = "-"
-				var qtype uint16 = 0
-				var qtypeName = "-"
-
-				if len(dns.Questions) > 0 {
-					question := dns.Questions[0]
-					dnsQuery = string(question.Name)
-					qclass = uint16(question.Class)
-					qclassName = dnsClassToString(question.Class)
-					qtype = uint16(question.Type)
-					qtypeName = dnsTypeToString(question.Type)
-				}
+				chosenQuestion := selectDNSQuestion(dns.Questions)
+				dnsQuery := string(chosenQuestion.Name)
+				qclass := uint16(chosenQuestion.Class)
+				qtype := uint16(chosenQuestion.Type)
+				qclassName := dnsClassToString(qclass)
+				qtypeName := dnsTypeToString(chosenQuestion.Type)
 
 				logEntry := DNSLog{
 					Timestamp:  fmt.Sprintf("%.6f", float64(qi.Timestamp.UnixNano())/1e9),
@@ -471,9 +505,9 @@ func (logger *DNSLogStrategy) ExpireQueries(expireAfter time.Duration) {
 					OrigP:      qi.SrcPort,
 					RespH:      qi.DstIP,
 					RespP:      qi.DstPort,
-					Proto:      "udp", // Because unanswered queries are typically over UDP
+					Proto:      "udp",
 					TransID:    dns.ID,
-					Rtt:        "-", // unanswered
+					Rtt:        "-",
 					Query:      dnsQuery,
 					QClass:     qclass,
 					QClassName: qclassName,
@@ -490,8 +524,6 @@ func (logger *DNSLogStrategy) ExpireQueries(expireAfter time.Duration) {
 					TTLs:       []uint32{},
 					Rejected:   false,
 				}
-
-				// Choose plain vs. JSON based on logger.outputFormat
 				var logString string
 				if logger.outputFormat == "plain" {
 					logString = logger.formatPlainLog(logEntry)
@@ -503,12 +535,9 @@ func (logger *DNSLogStrategy) ExpireQueries(expireAfter time.Duration) {
 					}
 					logString = string(data)
 				}
-
 				logger.lock.Lock()
 				logger.writer.WriteString(logString + "\n")
 				logger.lock.Unlock()
-
-				// Remove from unanswered queries
 				delete(logger.queries, key)
 			}
 		}
@@ -554,7 +583,7 @@ func (logger *DNSLogStrategy) formatPlainLog(dnsLog DNSLog) string {
 		dnsLog.Proto,
 		dnsLog.TransID,
 		rtt,
-		query,
+		dnsLog.Query,
 		dnsLog.QClass,
 		dnsLog.QClassName,
 		dnsLog.QType,
@@ -573,25 +602,21 @@ func (logger *DNSLogStrategy) formatPlainLog(dnsLog DNSLog) string {
 }
 
 func (logger *DNSLogStrategy) Close() {
-	// Before closing, log/flush any remaining unanswered DNS queries
+	// Flush remaining queries.
 	logger.qsLock.Lock()
 	for key, qi := range logger.queries {
 		dns := qi.DNS
-		var dnsQuery string
-		var qclass uint16 = 0
-		var qclassName = "-"
-		var qtype uint16 = 0
-		var qtypeName = "-"
-
+		query := dnsQuestionsToString(dns.Questions)
+		qclass := uint16(0)
+		qtype := uint16(0)
+		qclassName := "-"
+		qtypeName := "-"
 		if len(dns.Questions) > 0 {
-			question := dns.Questions[0]
-			dnsQuery = string(question.Name)
-			qclass = uint16(question.Class)
-			qclassName = dnsClassToString(question.Class)
-			qtype = uint16(question.Type)
-			qtypeName = dnsTypeToString(question.Type)
+			qclass = uint16(dns.Questions[0].Class)
+			qtype = uint16(dns.Questions[0].Type)
+			qclassName = dnsClassToString(qclass)
+			qtypeName = dnsTypeToString(dns.Questions[0].Type)
 		}
-
 		logEntry := DNSLog{
 			Timestamp:  fmt.Sprintf("%.6f", float64(qi.Timestamp.UnixNano())/1e9),
 			Uid:        qi.Uid,
@@ -600,10 +625,10 @@ func (logger *DNSLogStrategy) Close() {
 			OrigP:      qi.SrcPort,
 			RespH:      qi.DstIP,
 			RespP:      qi.DstPort,
-			Proto:      "udp", // Typically unanswered queries are UDP-based
+			Proto:      "udp",
 			TransID:    dns.ID,
-			Rtt:        "-", // unanswered
-			Query:      dnsQuery,
+			Rtt:        "-",
+			Query:      query,
 			QClass:     qclass,
 			QClassName: qclassName,
 			QType:      qtype,
@@ -619,8 +644,6 @@ func (logger *DNSLogStrategy) Close() {
 			TTLs:       []uint32{},
 			Rejected:   false,
 		}
-
-		// Again, pick plain vs. JSON
 		var logString string
 		if logger.outputFormat == "plain" {
 			logString = logger.formatPlainLog(logEntry)
@@ -632,17 +655,14 @@ func (logger *DNSLogStrategy) Close() {
 			}
 			logString = string(data)
 		}
-
 		logger.lock.Lock()
 		logger.writer.WriteString(logString + "\n")
 		logger.lock.Unlock()
-
-		// Remove it
 		delete(logger.queries, key)
 	}
 	logger.qsLock.Unlock()
 
-	// Finally close the base logger
+	// Finally close the base logger.
 	logger.BaseLogger.Close()
 }
 
