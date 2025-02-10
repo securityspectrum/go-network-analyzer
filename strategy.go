@@ -16,26 +16,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-func selectDNSQueryString(questions []layers.DNSQuestion) string {
-	if len(questions) == 0 {
-		return "-"
-	}
-	// Build a slice of question names.
-	var names []string
-	for _, q := range questions {
-		// Remove any trailing nulls and extra whitespace.
-		name := strings.TrimRight(string(q.Name), "\x00")
-		name = strings.TrimSpace(name)
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	if len(names) == 0 {
-		return "-"
-	}
-	return strings.Join(names, ",")
-}
-
 func selectDNSQuestion(questions []layers.DNSQuestion) layers.DNSQuestion {
 	if len(questions) == 0 {
 		return layers.DNSQuestion{}

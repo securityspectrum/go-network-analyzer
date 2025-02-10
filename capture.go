@@ -48,13 +48,19 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 
 	// Periodically remove inactive connections.
 	ticker := time.NewTicker(10 * time.Second)
+	done := make(chan bool)
 	go func() {
-		for range ticker.C {
-			connManager.RemoveInactiveConnections()
-			connManager.PrintActiveConnectionsCount()
+		for {
+			select {
+			case <-ticker.C:
+				connManager.RemoveInactiveConnections()
+			case <-done:
+				return
+			}
 		}
 	}()
-	wg.Wait()
+	time.Sleep(2 * time.Second) // give some time for pending connections to age
+	done <- true
 	ticker.Stop()
 
 	// Flush logs.

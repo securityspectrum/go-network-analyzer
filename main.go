@@ -24,6 +24,8 @@ var (
 )
 
 func main() {
+	log.SetOutput(os.Stdout)
+
 	// Define flags
 	flag.BoolVar(&showVersion, "version", false, "Show the version of the program")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
