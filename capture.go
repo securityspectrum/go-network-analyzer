@@ -90,7 +90,9 @@ func capturePackets(deviceName string, context *LogContext, wg *sync.WaitGroup, 
 			}
 			sessionID := generateSessionID(packet)
 			uid := generateUID(packet)
-			log.Printf("Captured packet with UID: %s, SessionID: %s", uid, sessionID)
+			if verbose {
+				log.Printf("Captured packet with UID: %s, SessionID: %s", uid, sessionID)
+			}
 			context.Log(PacketEvent{
 				Timestamp: packet.Metadata().Timestamp,
 				Uid:       uid,

@@ -89,32 +89,37 @@ type HTTPLog struct {
 	StatusMsg       string   `json:"status_msg"`
 	Tags            []string `json:"tags"`
 	RespFuids       []string `json:"resp_fuids"`
+	Username        string   `json:"username"`
+	Password        string   `json:"password"`
+	RespMimeTypes   []string `json:"resp_mime_types"`
 }
 
 // HTTPTransaction holds the request and response information for one HTTP transaction.
 type HTTPTransaction struct {
-	// Common fields.
-	Timestamp time.Time // the time of the request
-	Uid       string
-	SessionID string
-	// Addresses and ports.
-	OrigH      string
-	OrigP      uint16
-	RespH      string
-	RespP      uint16
+	Timestamp  time.Time
+	Uid        string
+	SessionID  string
+	OrigH      string // client IP
+	OrigP      uint16 // client port
+	RespH      string // server IP
+	RespP      uint16 // server port
 	TransDepth int
-	// Request fields.
+	// Request fields:
 	Method         string
 	Host           string
 	URI            string
 	UserAgent      string
 	Version        string
 	RequestBodyLen int
-	// Response fields.
+	// Response fields:
 	ResponseBodyLen int
 	StatusCode      int
 	StatusMsg       string
-	// (Other fields such as tags or fuids could be added later.)
+	// Extracted credentials from basic auth:
+	Username string
+	Password string
+	// Extracted MIME type from the response:
+	RespMimeType string
 }
 
 func dnsClassToString(dnsClass uint16) string {

@@ -695,7 +695,7 @@ func NewHTTPLogStrategy(filePath string, flushInterval int, outputFormat string)
 	}
 }
 
-func parseHTTPRequest(payload []byte) (method, host, uri, userAgent, version string, requestBodyLen int) {
+func parseHTTPRequest(payload []byte) (method, host, uri, userAgent, version, username, password string, requestBodyLen int) {
 	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(string(payload))))
 	if err != nil {
 		return
@@ -708,19 +708,32 @@ func parseHTTPRequest(payload []byte) (method, host, uri, userAgent, version str
 	if req.ContentLength > 0 {
 		requestBodyLen = int(req.ContentLength)
 	}
+	// Extract basic auth credentials if present.
+	u, p, ok := req.BasicAuth()
+	if ok {
+		username = u
+		password = p
+	}
 	return
 }
 
-func parseHTTPResponse(payload []byte) (statusCode int, statusMsg string, responseBodyLen int) {
+func parseHTTPResponse(payload []byte) (statusCode int, statusMsg string, responseBodyLen int, mimeType string) {
 	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(string(payload))), nil)
 	if err != nil {
 		return
 	}
 	statusCode = resp.StatusCode
-	statusMsg = resp.Status
+	// Remove the leading code from status (e.g., "200 OK" becomes "OK")
+	parts := strings.SplitN(resp.Status, " ", 2)
+	if len(parts) == 2 {
+		statusMsg = parts[1]
+	} else {
+		statusMsg = resp.Status
+	}
 	if resp.ContentLength > 0 {
 		responseBodyLen = int(resp.ContentLength)
 	}
+	mimeType = resp.Header.Get("Content-Type")
 	return
 }
 
@@ -769,7 +782,6 @@ func extractDstPort(packet gopacket.Packet) uint16 {
 }
 
 func (logger *HTTPLogStrategy) logHTTPTransaction(tx *HTTPTransaction) {
-	// Build an HTTPLog record from the transaction.
 	httpLog := HTTPLog{
 		Timestamp:       tx.Timestamp.Format(time.RFC3339),
 		Uid:             tx.Uid,
@@ -778,7 +790,7 @@ func (logger *HTTPLogStrategy) logHTTPTransaction(tx *HTTPTransaction) {
 		OrigP:           tx.OrigP,
 		RespH:           tx.RespH,
 		RespP:           tx.RespP,
-		Proto:           "tcp", // for HTTP, typically tcp
+		Proto:           "tcp", // HTTP is over TCP
 		TransDepth:      tx.TransDepth,
 		Method:          tx.Method,
 		Host:            tx.Host,
@@ -789,8 +801,11 @@ func (logger *HTTPLogStrategy) logHTTPTransaction(tx *HTTPTransaction) {
 		ResponseBodyLen: tx.ResponseBodyLen,
 		StatusCode:      tx.StatusCode,
 		StatusMsg:       tx.StatusMsg,
-		Tags:            []string{},
-		RespFuids:       []string{},
+		Tags:            []string{}, // not parsed here
+		RespFuids:       []string{}, // not parsed here
+		Username:        tx.Username,
+		Password:        tx.Password,
+		RespMimeTypes:   []string{tx.RespMimeType},
 	}
 	var logString string
 	if logger.outputFormat == "plain" {
@@ -821,15 +836,14 @@ func (logger *HTTPLogStrategy) Log(event PacketEvent) {
 	logger.txLock.Lock()
 	defer logger.txLock.Unlock()
 
-	// If the packet is an HTTP request...
+	// If this packet carries an HTTP request...
 	if isHTTPRequest(payload) {
-		httpMethod, httpHost, httpURI, httpUserAgent, httpVersion, requestBodyLen := parseHTTPRequest(payload)
-		// Create a new transaction record.
+		httpMethod, httpHost, httpURI, httpUserAgent, httpVersion, reqUsername, reqPassword, requestBodyLen := parseHTTPRequest(payload)
 		tx := &HTTPTransaction{
 			Timestamp:      event.Timestamp,
 			Uid:            event.Uid,
 			SessionID:      event.SessionID,
-			OrigH:          extractSrcIP(event.Packet), // assume request comes from the client
+			OrigH:          extractSrcIP(event.Packet),
 			OrigP:          extractSrcPort(event.Packet),
 			RespH:          extractDstIP(event.Packet),
 			RespP:          extractDstPort(event.Packet),
@@ -840,22 +854,25 @@ func (logger *HTTPLogStrategy) Log(event PacketEvent) {
 			UserAgent:      httpUserAgent,
 			Version:        httpVersion,
 			RequestBodyLen: requestBodyLen,
+			Username:       reqUsername,
+			Password:       reqPassword,
 		}
 		logger.httpTransactions[event.SessionID] = tx
 		return
 	}
 
-	// If the packet is an HTTP response...
+	// If this packet carries an HTTP response...
 	if isHTTPResponse(payload) {
-		statusCode, statusMsg, responseBodyLen := parseHTTPResponse(payload)
+		statusCode, statusMsg, responseBodyLen, mimeType := parseHTTPResponse(payload)
 		if tx, exists := logger.httpTransactions[event.SessionID]; exists {
 			tx.ResponseBodyLen = responseBodyLen
 			tx.StatusCode = statusCode
 			tx.StatusMsg = statusMsg
+			tx.RespMimeType = mimeType
 			logger.logHTTPTransaction(tx)
 			delete(logger.httpTransactions, event.SessionID)
 		} else {
-			// No matching request found: log a partial transaction.
+			// No matching request: log a partial transaction.
 			tx := &HTTPTransaction{
 				Timestamp:       event.Timestamp,
 				Uid:             event.Uid,
@@ -868,34 +885,85 @@ func (logger *HTTPLogStrategy) Log(event PacketEvent) {
 				ResponseBodyLen: responseBodyLen,
 				StatusCode:      statusCode,
 				StatusMsg:       statusMsg,
+				RespMimeType:    mimeType,
 			}
 			logger.logHTTPTransaction(tx)
 		}
 	}
 }
-
 func (logger *HTTPLogStrategy) formatPlainLog(httpLog HTTPLog) string {
-	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s",
-		httpLog.Timestamp,        // ts
-		httpLog.Uid,              // uid
-		httpLog.OrigH,            // id.orig_h
-		httpLog.OrigP,            // id.orig_p
-		httpLog.RespH,            // id.resp_h
-		httpLog.RespP,            // id.resp_p
-		httpLog.TransDepth,       // trans_depth
-		httpLog.Method,           // method
-		httpLog.Host,             // host
-		httpLog.URI,              // uri
-		httpLog.UserAgent,        // user_agent
-		httpLog.Version,          // version
-		httpLog.RequestBodyLen,   // request_body_len
-		httpLog.ResponseBodyLen,  // response_body_len
-		httpLog.StatusCode,       // status_code
-		httpLog.StatusMsg,        // status_msg
-		formatTags(httpLog.Tags), // tags
-		// (Add more fields as needed to match Zeek’s output)
-		"-",
-		"-",
+	// Default values for fields not carried in our HTTPLog struct:
+	referrer := "-"    // field 11
+	origin := "-"      // field 14
+	infoCodeStr := "-" // field 19
+	infoMsg := "-"     // field 20
+
+	// For version, remove any "HTTP/" prefix.
+	version := httpLog.Version
+	if strings.HasPrefix(version, "HTTP/") {
+		version = strings.TrimPrefix(version, "HTTP/")
+	}
+
+	// For tags: if empty, print "(empty)"
+	tags := "(empty)"
+	if len(httpLog.Tags) > 0 {
+		tags = strings.Join(httpLog.Tags, ",")
+	}
+
+	// Username and password defaults.
+	username := httpLog.Username
+	if username == "" {
+		username = "-"
+	}
+	password := httpLog.Password
+	if password == "" {
+		password = "-"
+	}
+	proxied := "-" // field 24
+
+	origFuids := "-"     // field 25
+	origFilenames := "-" // field 26
+	origMimeTypes := "-" // field 27
+
+	respFuids := "-"     // field 28
+	respFilenames := "-" // field 29
+
+	respMimeTypes := "-"
+	if len(httpLog.RespMimeTypes) > 0 {
+		respMimeTypes = strings.Join(httpLog.RespMimeTypes, ",")
+	}
+
+	return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+		httpLog.Timestamp,       // 1. ts
+		httpLog.Uid,             // 2. uid
+		httpLog.OrigH,           // 3. id.orig_h
+		httpLog.OrigP,           // 4. id.orig_p
+		httpLog.RespH,           // 5. id.resp_h
+		httpLog.RespP,           // 6. id.resp_p
+		httpLog.TransDepth,      // 7. trans_depth
+		httpLog.Method,          // 8. method
+		httpLog.Host,            // 9. host
+		httpLog.URI,             // 10. uri
+		referrer,                // 11. referrer
+		version,                 // 12. version
+		httpLog.UserAgent,       // 13. user_agent
+		origin,                  // 14. origin
+		httpLog.RequestBodyLen,  // 15. request_body_len
+		httpLog.ResponseBodyLen, // 16. response_body_len
+		httpLog.StatusCode,      // 17. status_code
+		httpLog.StatusMsg,       // 18. status_msg
+		infoCodeStr,             // 19. info_code
+		infoMsg,                 // 20. info_msg
+		tags,                    // 21. tags
+		username,                // 22. username
+		password,                // 23. password
+		proxied,                 // 24. proxied
+		origFuids,               // 25. orig_fuids
+		origFilenames,           // 26. orig_filenames
+		origMimeTypes,           // 27. orig_mime_types
+		respFuids,               // 28. resp_fuids
+		respFilenames,           // 29. resp_filenames
+		respMimeTypes,           // 30. resp_mime_types
 	)
 }
 
