@@ -189,7 +189,7 @@ func generateSessionID(packet gopacket.Packet) string {
 		dstPort = 0
 		protocol = "unknown_transport"
 	}
-	origH, origP, respH, respP := determineEndpoints(srcIP, srcPort, dstIP, dstPort)
+	origH, origP, respH, respP := determineEndpoints(srcIP, srcPort, dstIP, dstPort, protocol)
 	return GetConnectionKey(origH, origP, respH, respP, protocol)
 }
 

@@ -56,6 +56,8 @@ type Connection struct {
 	// For debugging state changes:
 	lastState   string
 	lastHistory string
+
+	firstPacketAssigned bool
 }
 
 // GetConnectionKey returns the key (5-tuple) for a connection.
@@ -69,7 +71,13 @@ func GetConnectionKey(origH string, origP uint16, respH string, respP uint16, pr
 }
 
 // determineEndpoints uses a well-known port heuristic.
-func determineEndpoints(srcIP string, srcPort uint16, dstIP string, dstPort uint16) (origH string, origP uint16, respH string, respP uint16) {
+func determineEndpoints(srcIP string, srcPort uint16, dstIP string, dstPort uint16, protocol string) (origH string, origP uint16, respH string, respP uint16) {
+	if protocol == "udp" {
+		// For UDP, the first packet's direction should already be set in the connection.
+		// Return values as-is (caller should have stored them).
+		return srcIP, srcPort, dstIP, dstPort
+	}
+	// For TCP and others, use your existing logic:
 	localSrc := isLocalIP(srcIP)
 	localDst := isLocalIP(dstIP)
 	// If one endpoint is local and the other is not, choose the local IP as the originator.
@@ -174,8 +182,15 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 		origP = 0
 		respH = dstIP
 		respP = 0
+	} else if protocol == "udp" {
+		// For UDP, we want to use the first packet's direction.
+		// Do not recalc endpoints if the connection is already established.
+		origH = srcIP
+		origP = srcPort
+		respH = dstIP
+		respP = dstPort
 	} else {
-		origH, origP, respH, respP = determineEndpoints(srcIP, srcPort, dstIP, dstPort)
+		origH, origP, respH, respP = determineEndpoints(srcIP, srcPort, dstIP, dstPort, protocol)
 	}
 
 	if verbose {
@@ -217,6 +232,10 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 			historyCount:    make(map[byte]int),
 			lastHistoryTime: make(map[string]time.Time),
 		}
+		// For UDP, mark that the first packet's direction is fixed.
+		if protocol == "udp" {
+			conn.firstPacketAssigned = true
+		}
 		if protocol == "icmp" && len(extraParams) >= 2 {
 			conn.icmpType = extraParams[0].(uint8)
 			conn.icmpCode = extraParams[1].(uint8)
@@ -225,18 +244,27 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 		atomic.AddUint64(&cm.totalConnections, 1)
 	} else {
 		conn = value.(*Connection)
+		// For UDP, do not modify endpoints once first packet is assigned.
+		if protocol != "udp" {
+			// For TCP and others, recalc endpoints based on heuristic.
+			origH, origP, respH, respP = determineEndpoints(srcIP, srcPort, dstIP, dstPort, protocol)
+			conn.origH = origH
+			conn.origP = origP
+			conn.respH = respH
+			conn.respP = respP
+		}
 		if nowSec > conn.lastSeen {
 			conn.lastSeen = nowSec
 			conn.duration = conn.lastSeen - conn.startTime
 		}
 	}
 
-	// Mark connection as bidirectional if srcIP differs from origH.
+	// Mark connection as bidirectional if srcIP differs from conn.origH.
 	if srcIP != conn.origH {
 		conn.bidirectional = true
 	}
 
-	// Update TCP state if applicable.
+	// Update protocol-specific state.
 	switch protocol {
 	case "tcp":
 		cm.updateTCPState(conn, tcpLayer.(*layers.TCP), srcIP == conn.origH)
