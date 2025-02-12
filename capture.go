@@ -2,9 +2,11 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"github.com/google/gopacket/layers"
 	"log"
+	"math/big"
 	"os"
 	"sync"
 	"time"
@@ -47,21 +49,18 @@ func runCapture(deviceName, logDir string, flushInterval int, stopChan chan stru
 	go capturePackets(deviceName, context, &wg, stopChan)
 
 	// Periodically remove inactive connections.
-	ticker := time.NewTicker(10 * time.Second)
-	done := make(chan bool)
+	ticker := time.NewTicker(2 * time.Second)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
 				connManager.RemoveInactiveConnections()
-			case <-done:
+			case <-stopChan:
+				ticker.Stop()
 				return
 			}
 		}
 	}()
-	time.Sleep(2 * time.Second) // give some time for pending connections to age
-	done <- true
-	ticker.Stop()
 
 	// Flush logs.
 	context.Close()
@@ -194,8 +193,42 @@ func generateSessionID(packet gopacket.Packet) string {
 	return GetConnectionKey(origH, origP, respH, respP, protocol)
 }
 
+var connectionCounter uint64
+
+func base62EncodeBig(i *big.Int) string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	if i.Cmp(big.NewInt(0)) == 0 {
+		return string(alphabet[0])
+	}
+	result := ""
+	base := big.NewInt(62)
+	zero := big.NewInt(0)
+	mod := new(big.Int)
+	for i.Cmp(zero) > 0 {
+		i.DivMod(i, base, mod)
+		result = string(alphabet[mod.Int64()]) + result
+	}
+	return result
+}
+
+func generateRandomUID() (string, error) {
+	b := make([]byte, 16) // 16 bytes = 128 bits
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	i := new(big.Int).SetBytes(b)
+	// Encode to base62.
+	return base62EncodeBig(i), nil
+}
+
 func generateUID(packet gopacket.Packet) string {
-	return fmt.Sprintf("%x", packet.Metadata().CaptureInfo.Timestamp.UnixNano())
+	uid, err := generateRandomUID()
+	if err != nil {
+		// Fallback: use timestamp if randomness fails.
+		return "C" + fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	// Prepend "C" to mimic Zeek’s style.
+	return "C" + uid
 }
 
 func getDefaultConfig() *Config {

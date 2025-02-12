@@ -513,29 +513,34 @@ func (cm *ConnectionManager) RemoveInactiveConnections() {
 			timeoutSeconds = cm.timeout.Seconds()
 		}
 
+		// In RemoveInactiveConnections (connection.go):
+		now := float64(time.Now().UnixNano()) / 1e9
 		duration := conn.lastSeen - conn.startTime
+		inactivity := now - conn.lastSeen // time since the last packet arrived
 		shouldRemove := false
 		reason := ""
 		if conn.protocol == "tcp" {
 			state := cm.GetConnState(conn)
-			if (state == "SF" || state == "REJ") && duration > 30 {
+			// For complete TCP connections (SF or REJ), log as soon as they've been inactive for 1 second.
+			if (state == "SF" || state == "REJ") && inactivity > 1 {
 				shouldRemove = true
-				reason = fmt.Sprintf("connection finished (%s) + 30s wait", state)
-			} else if duration > timeoutSeconds {
+				reason = fmt.Sprintf("connection finished (%s) with 1s inactivity", state)
+			} else if inactivity > timeoutSeconds {
 				shouldRemove = true
-				reason = fmt.Sprintf("%.2fs inactivity timeout", duration)
+				reason = fmt.Sprintf("%.2fs inactivity timeout", inactivity)
 			}
-		} else if duration > timeoutSeconds {
+		} else if inactivity > timeoutSeconds {
 			shouldRemove = true
-			reason = fmt.Sprintf("%.2fs inactivity timeout", duration)
+			reason = fmt.Sprintf("%.2fs inactivity timeout", inactivity)
 		}
 		if shouldRemove {
 			if verbose {
-				log.Printf("[%.6f] [Remove] Removing connection (%s): %s:%d -> %s:%d Protocol=%s State=%s History=%s Duration=%.2fs",
+				log.Printf("[%.6f] [Remove] Removing connection (%s): %s:%d -> %s:%d Protocol=%s State=%s History=%s Duration=%.2fs Inactivity=%.2fs",
 					conn.lastSeen, reason,
 					conn.origH, conn.origP, conn.respH, conn.respP,
 					conn.protocol, cm.GetConnState(conn), conn.history,
-					duration)
+					duration,
+					inactivity)
 			}
 			if cm.finalizeCallback != nil {
 				// Log the final connection record using the callback.

@@ -40,9 +40,11 @@ type LogStrategy interface {
 
 // BaseLogger uses lumberjack for log rotation.
 type BaseLogger struct {
-	closer io.WriteCloser
-	writer *bufio.Writer
-	lock   sync.Mutex
+	closer    io.WriteCloser
+	writer    *bufio.Writer
+	lock      sync.Mutex
+	fileName  string // stores the log file path
+	lineCount int64  // counts the number of lines written
 }
 
 func NewBaseLogger(filePath string, flushInterval time.Duration) *BaseLogger {
@@ -63,8 +65,10 @@ func NewBaseLogger(filePath string, flushInterval time.Duration) *BaseLogger {
 		Compress:   true,
 	}
 	bl := &BaseLogger{
-		closer: ljLogger,
-		writer: bufio.NewWriter(ljLogger),
+		closer:    ljLogger,
+		writer:    bufio.NewWriter(ljLogger),
+		fileName:  filePath,
+		lineCount: 0,
 	}
 	go bl.periodicFlush(flushInterval)
 	return bl
@@ -74,12 +78,24 @@ func (b *BaseLogger) periodicFlush(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
+		log.Printf("Flushing log buffer for file: %s, total lines written so far: %d", b.fileName, b.lineCount)
 		b.lock.Lock()
 		if err := b.writer.Flush(); err != nil {
 			log.Printf("Error flushing log buffer: %v", err)
 		}
 		b.lock.Unlock()
 	}
+}
+
+func (b *BaseLogger) WriteLine(line string) error {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	// Write the line plus a newline
+	_, err := b.writer.WriteString(line + "\n")
+	if err == nil {
+		b.lineCount++
+	}
+	return err
 }
 
 func (b *BaseLogger) Close() {
@@ -119,24 +135,6 @@ func NewConnLogStrategy(filePath string, connManager *ConnectionManager, flushIn
 
 func (logger *ConnLogStrategy) Log(event PacketEvent) {
 	_ = logger.connManager.UpdateConnection(event)
-	//if conn == nil {
-	//	return
-	//}
-	//state := logger.connManager.GetConnState(conn)
-	//// For TCP, log if state is not S0.
-	//if conn.protocol == "tcp" {
-	//	if state != "S0" && !conn.logged {
-	//		logger.logConnection(conn, state)
-	//		conn.logged = true
-	//	}
-	//}
-	//// For other protocols, log immediately.
-	//if conn.protocol == "udp" || conn.protocol == "icmp" || conn.protocol == "igmp" {
-	//	if !conn.logged {
-	//		logger.logConnection(conn, state)
-	//		conn.logged = true
-	//	}
-	//}
 }
 
 func (logger *ConnLogStrategy) logConnection(conn *Connection, state string) {
@@ -184,9 +182,9 @@ func (logger *ConnLogStrategy) logConnection(conn *Connection, state string) {
 		}
 		logString = string(data)
 	}
-	logger.lock.Lock()
-	logger.writer.WriteString(logString + "\n")
-	logger.lock.Unlock()
+	if err := logger.WriteLine(logString); err != nil {
+		log.Printf("Error writing connection log line: %v", err)
+	}
 	if verbose {
 		log.Printf("Logged connection: %s", logString)
 	}
