@@ -30,29 +30,16 @@ func init() {
 	}
 }
 
-func isLocalIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	// Check if IP is in a private range; also exclude multicast addresses.
-	if ip.IsLoopback() || ip.IsPrivate() {
-		// Exclude multicast addresses
-		if ip.IsMulticast() {
-			return false
+func isLocalIP(ip string) bool {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	for _, network := range localNets {
+		if network.Contains(parsedIP) {
+			return true
 		}
-		return true
 	}
 	return false
 }
-
-//func isLocalIP(ip string) bool {
-//	parsedIP := net.ParseIP(ip)
-//	if parsedIP == nil {
-//		return false
-//	}
-//
-//	for _, network := range localNets {
-//		if network.Contains(parsedIP) {
-//			return true
-//		}
-//	}
-//	return false
-//}

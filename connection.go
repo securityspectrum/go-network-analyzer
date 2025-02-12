@@ -30,6 +30,7 @@ type Connection struct {
 	origIPBytes, respIPBytes int
 	history                  string
 	historyCount             map[byte]int
+	lastHistoryTime          map[string]time.Time
 	seenFirstAck             bool
 	origState, respState     string
 	localOrig, localResp     bool
@@ -69,12 +70,23 @@ func GetConnectionKey(origH string, origP uint16, respH string, respP uint16, pr
 
 // determineEndpoints uses a well-known port heuristic.
 func determineEndpoints(srcIP string, srcPort uint16, dstIP string, dstPort uint16) (origH string, origP uint16, respH string, respP uint16) {
+	localSrc := isLocalIP(srcIP)
+	localDst := isLocalIP(dstIP)
+	// If one endpoint is local and the other is not, choose the local IP as the originator.
+	if localSrc && !localDst {
+		return srcIP, srcPort, dstIP, dstPort
+	}
+	if localDst && !localSrc {
+		return dstIP, dstPort, srcIP, srcPort
+	}
+	// If both are local or both are non-local, use the well-known port heuristic first.
 	if srcPort < 1024 && dstPort >= 1024 {
 		return dstIP, dstPort, srcIP, srcPort
 	}
 	if dstPort < 1024 && srcPort >= 1024 {
 		return srcIP, srcPort, dstIP, dstPort
 	}
+	// Fallback to lexical ordering of IP addresses.
 	ip1 := net.ParseIP(srcIP)
 	ip2 := net.ParseIP(dstIP)
 	if bytes.Compare(ip1, ip2) <= 0 {
@@ -189,20 +201,21 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 
 	if !exists {
 		conn = &Connection{
-			origH:        origH,
-			origP:        origP,
-			respH:        respH,
-			respP:        respP,
-			protocol:     protocol,
-			startTime:    nowSec,
-			lastSeen:     nowSec,
-			uid:          event.Uid,
-			localOrig:    isLocalIP(origH),
-			localResp:    isLocalIP(respH),
-			ipProto:      ipProto,
-			lastPacketTS: nowSec,
-			history:      "",
-			historyCount: make(map[byte]int),
+			origH:           origH,
+			origP:           origP,
+			respH:           respH,
+			respP:           respP,
+			protocol:        protocol,
+			startTime:       nowSec,
+			lastSeen:        nowSec,
+			uid:             event.Uid,
+			localOrig:       isLocalIP(origH),
+			localResp:       isLocalIP(respH),
+			ipProto:         ipProto,
+			lastPacketTS:    nowSec,
+			history:         "",
+			historyCount:    make(map[byte]int),
+			lastHistoryTime: make(map[string]time.Time),
 		}
 		if protocol == "icmp" && len(extraParams) >= 2 {
 			conn.icmpType = extraParams[0].(uint8)
@@ -305,21 +318,14 @@ func (cm *ConnectionManager) UpdateConnection(event PacketEvent) *Connection {
 
 // updateTCPState processes TCP flags and updates connection state.
 func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, isOrig bool) {
-	if verbose {
-		log.Printf("[%.6f] [TCP State] %s:%d -> %s:%d Flags: SYN=%v ACK=%v FIN=%v RST=%v",
-			conn.lastSeen, conn.origH, conn.origP, conn.respH, conn.respP,
-			tcp.SYN, tcp.ACK, tcp.FIN, tcp.RST)
-	}
 	// SYN (without ACK)
 	if tcp.SYN && !tcp.ACK {
 		if isOrig && !conn.origSeenSYN {
 			conn.origSeenSYN = true
-			conn.origState = "S0"
 			cm.addHistory(conn, 'S', true)
 		} else if !isOrig && !conn.respSeenSYN {
 			conn.respSeenSYN = true
-			// Pass uppercase 'S' to be normalized.
-			cm.addHistory(conn, 'S', false)
+			cm.addHistory(conn, 'H', false) // 'H' will be converted to 'h'
 		}
 		return
 	}
@@ -327,37 +333,36 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 	if tcp.SYN && tcp.ACK && !isOrig {
 		if !conn.seenFirstAck {
 			conn.seenFirstAck = true
-			// Pass uppercase 'H'; addHistory converts it to lowercase.
-			cm.addHistory(conn, 'H', false)
-			conn.respState = "S1"
+			cm.addHistory(conn, 'H', false) // first responder SYN-ACK
 		}
 		return
 	}
-	// Pure ACK (no payload, FIN, or RST)
+	// Pure ACK (no payload)
 	if tcp.ACK && !tcp.FIN && !tcp.RST && len(tcp.Payload) == 0 {
 		if isOrig && !conn.origSeenACK {
 			conn.origSeenACK = true
-			conn.seenFirstAck = true
 			cm.addHistory(conn, 'A', true)
+		} else if !isOrig {
+			// For responder, always add ACK token to capture multiple ACKs.
+			cm.addHistory(conn, 'A', false)
 		}
 		return
 	}
-	// Data payload.
+	// Data payload: record first data and also a repeatable timing token 'T'.
 	if len(tcp.Payload) > 0 {
-		if isOrig && !conn.origSeenData {
-			conn.origSeenData = true
-			cm.addHistory(conn, 'D', true)
-		} else if !isOrig && !conn.respSeenData {
-			conn.respSeenData = true
-			cm.addHistory(conn, 'D', false)
+		if isOrig {
+			if !conn.origSeenData {
+				conn.origSeenData = true
+				cm.addHistory(conn, 'D', true)
+			}
+		} else {
+			if !conn.respSeenData {
+				conn.respSeenData = true
+				cm.addHistory(conn, 'D', false)
+			}
 		}
-		// Optionally detect service (e.g. HTTP) from payload.
-		payloadStr := string(tcp.Payload)
-		if strings.HasPrefix(payloadStr, "GET") ||
-			strings.HasPrefix(payloadStr, "POST") ||
-			strings.HasPrefix(payloadStr, "HTTP/") {
-			conn.service = "http"
-		}
+		// For every packet carrying data, add a timing update token 'T'.
+		cm.addHistory(conn, 'T', isOrig)
 		return
 	}
 	// FIN events.
@@ -365,24 +370,21 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 		if isOrig && !conn.origSeenFIN {
 			conn.origSeenFIN = true
 			cm.addHistory(conn, 'F', true)
-			conn.origState = "FIN"
 		} else if !isOrig && !conn.respSeenFIN {
 			conn.respSeenFIN = true
 			cm.addHistory(conn, 'F', false)
-			conn.respState = "FIN"
 		}
 		return
 	}
 	// RST events.
 	if tcp.RST {
-		if isOrig && !conn.origSeenRST {
+		if isOrig {
 			conn.origSeenRST = true
-		} else if !isOrig && !conn.respSeenRST {
+			cm.addHistory(conn, 'R', true)
+		} else {
 			conn.respSeenRST = true
+			cm.addHistory(conn, 'R', false)
 		}
-		cm.addHistory(conn, 'R', isOrig)
-		conn.origState = "RESET"
-		conn.respState = "RESET"
 		return
 	}
 }
@@ -390,38 +392,81 @@ func (cm *ConnectionManager) updateTCPState(conn *Connection, tcp *layers.TCP, i
 // addHistory appends a flag to the connection history.
 // Normalizes responder flags by converting uppercase to lowercase.
 func (cm *ConnectionManager) addHistory(conn *Connection, flag byte, isOrig bool) {
-	var normFlag byte
+	var token byte
 	if isOrig {
-		normFlag = flag
+		token = flag
 	} else {
-		// Convert uppercase letter to lowercase.
 		if flag >= 'A' && flag <= 'Z' {
-			normFlag = flag + 32
+			token = flag + 32
 		} else {
-			normFlag = flag
+			token = flag
 		}
 	}
-	// For once-only flags: A, D, I, Q.
-	onceOnly := "ADIQadiq"
-	if strings.ContainsRune(onceOnly, rune(normFlag)) {
-		if strings.Contains(conn.history, string(normFlag)) {
+
+	// Define our sets.
+	handshakeSetOriginator := "SAF" // handshake tokens from originator.
+	handshakeSetResponder := "haf"  // handshake tokens from responder.
+	repeatableSet := "dtr"          // tokens that can be repeated.
+
+	// Check if the token is a handshake token.
+	if isOrig && strings.ContainsRune(handshakeSetOriginator, rune(token)) {
+		if strings.Contains(conn.history, string(token)) {
 			return
 		}
-		conn.history += string(normFlag)
+		conn.history += string(token)
+		conn.historyCount[token]++
 		return
 	}
-	// For flags that can repeat, avoid consecutive duplicates.
-	if len(conn.history) > 0 && conn.history[len(conn.history)-1] == normFlag {
+	if !isOrig && strings.ContainsRune(handshakeSetResponder, rune(token)) {
+		if strings.Contains(conn.history, string(token)) {
+			return
+		}
+		conn.history += string(token)
+		conn.historyCount[token]++
 		return
 	}
-	conn.history += string(normFlag)
+
+	// Check if the token is in the repeatable set.
+	if strings.ContainsAny(string(token), repeatableSet) {
+		// Optionally, use a time-based rule: only append if at least 10ms have elapsed.
+		now := time.Now()
+		key := string(token)
+		if last, ok := conn.lastHistoryTime[key]; ok {
+			if now.Sub(last) < 10*time.Millisecond {
+				return
+			}
+		}
+		conn.lastHistoryTime[key] = now
+
+		// Remove (or increase) threshold to record more tokens.
+		threshold := 10 // You can adjust this threshold as needed.
+		count := conn.historyCount[token]
+		if count >= threshold {
+			return
+		}
+		conn.history += string(token)
+		conn.historyCount[token] = count + 1
+		return
+	}
+
+	// For any other tokens, avoid consecutive duplicates.
+	if len(conn.history) > 0 && conn.history[len(conn.history)-1] == token {
+		return
+	}
+	conn.history += string(token)
+	conn.historyCount[token]++
 }
 
 // GetConnState computes the connection state based on the recorded flags and counters.
 func (cm *ConnectionManager) GetConnState(conn *Connection) string {
 	switch conn.protocol {
 	case "tcp":
-		if conn.origState == "RESET" || conn.respState == "RESET" {
+		// If only the originator has sent a reset, return RSTO.
+		if conn.origSeenRST && !conn.respSeenRST {
+			return "RSTO"
+		}
+		// If either side sent a reset (or both), then return REJ.
+		if conn.origSeenRST || conn.respSeenRST {
 			return "REJ"
 		}
 		if conn.origSeenFIN && conn.respSeenFIN {
@@ -431,7 +476,6 @@ func (cm *ConnectionManager) GetConnState(conn *Connection) string {
 			return "SHR"
 		}
 		if conn.seenFirstAck || conn.origSeenACK {
-			// If handshake is complete, promote to OTH if any payload or byte count exists.
 			if conn.origSeenData || conn.respSeenData || conn.origBytes > 0 || conn.respBytes > 0 {
 				return "OTH"
 			}
