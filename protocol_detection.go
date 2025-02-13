@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"strings"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -44,8 +46,16 @@ func DetectProtocol(conn *Connection, packet gopacket.Packet) string {
 }
 
 func detectTCPProtocol(payload []byte, srcPort, dstPort layers.TCPPort) string {
+	// If payload looks HTTP-like, we require more evidence before labeling it.
 	if detectHTTP(payload) {
-		return "HTTP"
+		// Optionally check if the payload contains "HTTP/" at the expected position
+		// or if it matches a more detailed regex.
+		if len(payload) > 12 && bytes.Contains(payload, []byte(" HTTP/")) {
+			return "HTTP"
+		}
+		// If only a weak match (e.g., just a common method and space) exists,
+		// you may want to return "unknown" to be conservative.
+		return "unknown"
 	}
 	if detectTLS(payload) {
 		return "SSL"
@@ -64,13 +74,17 @@ func detectTCPProtocol(payload []byte, srcPort, dstPort layers.TCPPort) string {
 }
 
 func detectUDPProtocol(payload []byte, srcPort, dstPort layers.UDPPort) string {
-	if detectDNS(payload) {
-		return "DNS"
+	// Check known DNS ports.
+	if srcPort == 53 || dstPort == 53 ||
+		srcPort == 5353 || dstPort == 5353 ||
+		srcPort == 5355 || dstPort == 5355 {
+		if detectDNS(payload) {
+			return "dns"
+		}
 	}
 	if detectDHCP(payload) {
-		return "DHCP"
+		return "dhcp"
 	}
-	// Add more UDP protocol detections here
 	return "unknown"
 }
 
@@ -84,15 +98,53 @@ func detectHTTP(data []byte) bool {
 	return bytes.HasPrefix(data, []byte("HTTP/"))
 }
 
-func detectTLS(data []byte) bool {
-	return len(data) >= 3 &&
-		data[0] == 0x16 && // Handshake
-		data[1] == 0x03 && // SSL/TLS version
-		(data[2] >= 0x00 && data[2] <= 0x03) // SSL/TLS version minor
+func detectTLS(payload []byte) bool {
+	// TLS record header is 5 bytes.
+	if len(payload) < 5 {
+		return false
+	}
+	// Check that the content type is one of the allowed TLS types.
+	// While handshake (22) is most common for detection,
+	// some records may begin with Change Cipher Spec (20),
+	// Alert (21) or Application Data (23).
+	ct := payload[0]
+	if ct != 20 && ct != 21 && ct != 22 && ct != 23 {
+		return false
+	}
+	// Check TLS version: typically, the major version is 3.
+	major := payload[1]
+	minor := payload[2]
+	if major != 3 {
+		return false
+	}
+	// Accept minor versions 1-4 (TLS 1.0, 1.1, 1.2, and TLS 1.3 respectively).
+	if minor < 1 || minor > 4 {
+		return false
+	}
+	// Extract the TLS record length (bytes 3-4, big-endian).
+	recordLength := int(payload[3])<<8 | int(payload[4])
+	// TLS records should have a positive length and are typically no larger than 16KB.
+	if recordLength <= 0 || recordLength > 16384 {
+		return false
+	}
+	return true
 }
 
-func detectSSH(data []byte) bool {
-	return bytes.HasPrefix(data, []byte("SSH-"))
+func detectSSH(payload []byte) bool {
+	// SSH banners typically start with "SSH-" and include a version string.
+	if len(payload) < 5 {
+		return false
+	}
+	if !bytes.HasPrefix(payload, []byte("SSH-")) {
+		return false
+	}
+	// After "SSH-", there should be a version number (e.g., "2.0").
+	// A simple check: look for a dot within the next 5 bytes.
+	idx := bytes.IndexByte(payload[4:], '.')
+	if idx == -1 || idx > 5 {
+		return false
+	}
+	return true
 }
 
 func detectFTP(data []byte, srcPort, dstPort layers.TCPPort) bool {
@@ -104,15 +156,39 @@ func detectFTP(data []byte, srcPort, dstPort layers.TCPPort) bool {
 	return false
 }
 
-func detectSMTP(data []byte) bool {
-	return bytes.HasPrefix(data, []byte("220 ")) ||
-		bytes.HasPrefix(data, []byte("HELO ")) ||
-		bytes.HasPrefix(data, []byte("EHLO "))
+func detectSMTP(payload []byte) bool {
+	if len(payload) < 4 {
+		return false
+	}
+	// Check for server greeting "220 " (which is standard for SMTP servers).
+	if bytes.HasPrefix(payload, []byte("220 ")) {
+		// Optionally, check that there is some text following "220 ".
+		if len(payload) > 5 && payload[4] != '\r' && payload[4] != '\n' {
+			return true
+		}
+	}
+	// Check for client commands like "HELO " or "EHLO ".
+	if bytes.HasPrefix(payload, []byte("HELO ")) || bytes.HasPrefix(payload, []byte("EHLO ")) {
+		return true
+	}
+	// You might also check for "MAIL FROM:" or "RCPT TO:" but those are later in the SMTP transaction.
+	return false
 }
 
-func detectDNS(data []byte) bool {
-	return len(data) >= 12 &&
-		(data[2]&0x80 == 0 || data[2]&0x80 == 0x80)
+func detectDNS(payload []byte) bool {
+	// DNS header is 12 bytes minimum.
+	if len(payload) < 12 {
+		return false
+	}
+	var dns layers.DNS
+	if err := dns.DecodeFromBytes(payload, gopacket.NilDecodeFeedback); err != nil {
+		return false
+	}
+	// Basic sanity: at least one question or answer should be present.
+	if dns.QDCount == 0 && dns.ANCount == 0 {
+		return false
+	}
+	return true
 }
 
 func detectDHCP(data []byte) bool {
@@ -123,4 +199,24 @@ func detectDHCP(data []byte) bool {
 		data[3] == 0x00 // Hops
 }
 
-// Add more protocol detection functions as needed
+func DetectServiceForConnection(conn *Connection, packet gopacket.Packet) string {
+	detected := DetectProtocol(conn, packet)
+	if detected != "unknown" {
+		return strings.ToLower(detected)
+	}
+	return fallbackService(conn)
+}
+
+func fallbackService(conn *Connection) string {
+	switch conn.respP {
+	case 80, 8080:
+		return "http"
+	case 443:
+		return "ssl"
+	case 53:
+		return "dns"
+	// Add more port heuristics if needed
+	default:
+		return ""
+	}
+}

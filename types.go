@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"time"
 
@@ -9,7 +8,6 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// PacketEvent represents a captured packet event with extended fields.
 type PacketEvent struct {
 	Timestamp time.Time
 	Uid       string
@@ -18,59 +16,58 @@ type PacketEvent struct {
 }
 
 type ConnLog struct {
-	Timestamp     string   `json:"ts"`
-	Uid           string   `json:"uid"`
-	OrigH         string   `json:"id.orig_h"`
-	OrigP         uint16   `json:"id.orig_p"`
-	RespH         string   `json:"id.resp_h"`
-	RespP         uint16   `json:"id.resp_p"`
-	Proto         string   `json:"proto"`
-	Service       string   `json:"service,omitempty"`
-	Duration      float64  `json:"duration,omitempty"`
-	OrigBytes     int      `json:"orig_bytes,omitempty"`
-	RespBytes     int      `json:"resp_bytes,omitempty"`
-	ConnState     string   `json:"conn_state,omitempty"`
-	LocalOrig     bool     `json:"local_orig,omitempty"`
-	LocalResp     bool     `json:"local_resp,omitempty"`
-	MissedBytes   int      `json:"missed_bytes,omitempty"`
-	History       string   `json:"history,omitempty"`
-	OrigPkts      int      `json:"orig_pkts,omitempty"`
-	OrigIPBytes   int      `json:"orig_ip_bytes,omitempty"`
-	RespPkts      int      `json:"resp_pkts,omitempty"`
-	RespIPBytes   int      `json:"resp_ip_bytes,omitempty"`
-	TunnelParents []string `json:"tunnel_parents,omitempty"`
-	OrigL2Addr    string   `json:"orig_l2_addr,omitempty"`
-	RespL2Addr    string   `json:"resp_l2_addr,omitempty"`
-	Vlan          int      `json:"vlan,omitempty"`
-	InnerVlan     int      `json:"inner_vlan,omitempty"`
-	PacketCount   uint64   `json:"packet_count"`
+	Timestamp     string  `json:"ts"`
+	Uid           string  `json:"uid"`
+	OrigH         string  `json:"id.orig_h"`
+	OrigP         uint16  `json:"id.orig_p"`
+	RespH         string  `json:"id.resp_h"`
+	RespP         uint16  `json:"id.resp_p"`
+	Proto         string  `json:"proto"`
+	Service       string  `json:"service,omitempty"`
+	Duration      float64 `json:"duration,omitempty"`
+	OrigBytes     int     `json:"orig_bytes,omitempty"`
+	RespBytes     int     `json:"resp_bytes,omitempty"`
+	ConnState     string  `json:"conn_state,omitempty"`
+	LocalOrig     string  `json:"local_orig,omitempty"`
+	LocalResp     string  `json:"local_resp,omitempty"`
+	MissedBytes   int     `json:"missed_bytes,omitempty"`
+	History       string  `json:"history,omitempty"`
+	OrigPkts      int     `json:"orig_pkts,omitempty"`
+	OrigIPBytes   int     `json:"orig_ip_bytes,omitempty"`
+	RespPkts      int     `json:"resp_pkts,omitempty"`
+	RespIPBytes   int     `json:"resp_ip_bytes,omitempty"`
+	TunnelParents string  `json:"tunnel_parents,omitempty"`
+	IPProto       int     `json:"ip_proto"`
 }
 
-// DNSLog represents a DNS log entry.
 type DNSLog struct {
-	Timestamp string   `json:"ts"`
-	Uid       string   `json:"uid"`
-	SessionID string   `json:"session_id"`
-	OrigH     string   `json:"id.orig_h"`
-	OrigP     uint16   `json:"id.orig_p"`
-	RespH     string   `json:"id.resp_h"`
-	RespP     uint16   `json:"id.resp_p"`
-	Proto     string   `json:"proto"`
-	TransID   uint16   `json:"trans_id"`
-	Query     string   `json:"query,omitempty"`
-	RCode     uint16   `json:"rcode"`
-	RCodeName string   `json:"rcode_name"`
-	AA        bool     `json:"AA"`
-	TC        bool     `json:"TC"`
-	RD        bool     `json:"RD"`
-	RA        bool     `json:"RA"`
-	Z         uint8    `json:"Z"`
-	Answers   []string `json:"answers,omitempty"`
-	TTLs      []uint32 `json:"TTLs,omitempty"`
-	Rejected  bool     `json:"rejected"`
+	Timestamp  string   `json:"ts"`
+	Uid        string   `json:"uid"`
+	SessionID  string   `json:"session_id"`
+	OrigH      string   `json:"id.orig_h"`
+	OrigP      uint16   `json:"id.orig_p"`
+	RespH      string   `json:"id.resp_h"`
+	RespP      uint16   `json:"id.resp_p"`
+	Proto      string   `json:"proto"`
+	TransID    uint16   `json:"trans_id"`
+	Rtt        string   `json:"rtt"`
+	Query      string   `json:"query"`
+	QClass     uint16   `json:"qclass"`
+	QClassName string   `json:"qclass_name"`
+	QType      uint16   `json:"qtype"`
+	QTypeName  string   `json:"qtype_name"`
+	RCode      uint16   `json:"rcode"`
+	RCodeName  string   `json:"rcode_name"`
+	AA         bool     `json:"AA"`
+	TC         bool     `json:"TC"`
+	RD         bool     `json:"RD"`
+	RA         bool     `json:"RA"`
+	Z          uint8    `json:"Z"`
+	Answers    []string `json:"answers"`
+	TTLs       []uint32 `json:"TTLs"`
+	Rejected   bool     `json:"rejected"`
 }
 
-// HTTPLog represents an HTTP log entry.
 type HTTPLog struct {
 	Timestamp       string   `json:"ts"`
 	Uid             string   `json:"uid"`
@@ -92,19 +89,51 @@ type HTTPLog struct {
 	StatusMsg       string   `json:"status_msg"`
 	Tags            []string `json:"tags"`
 	RespFuids       []string `json:"resp_fuids"`
+	Username        string   `json:"username"`
+	Password        string   `json:"password"`
+	RespMimeTypes   []string `json:"resp_mime_types"`
 }
 
-// Helper functions for DNS translation.
-func dnsClassToString(dnsClass layers.DNSClass) string {
+// HTTPTransaction holds the request and response information for one HTTP transaction.
+type HTTPTransaction struct {
+	Timestamp  time.Time
+	Uid        string
+	SessionID  string
+	OrigH      string // client IP
+	OrigP      uint16 // client port
+	RespH      string // server IP
+	RespP      uint16 // server port
+	TransDepth int
+	// Request fields:
+	Method         string
+	Host           string
+	URI            string
+	UserAgent      string
+	Version        string
+	RequestBodyLen int
+	// Response fields:
+	ResponseBodyLen int
+	StatusCode      int
+	StatusMsg       string
+	// Extracted credentials from basic auth:
+	Username string
+	Password string
+	// Extracted MIME type from the response:
+	RespMimeType string
+}
+
+func dnsClassToString(dnsClass uint16) string {
 	switch dnsClass {
-	case layers.DNSClassIN:
-		return "IN"
-	case layers.DNSClassCS:
+	case 1:
+		return "C_INTERNET"
+	case 2:
 		return "CS"
-	case layers.DNSClassCH:
+	case 3:
 		return "CH"
-	case layers.DNSClassHS:
+	case 4:
 		return "HS"
+	case 32769:
+		return "qclass-32769"
 	default:
 		return "UNKNOWN"
 	}
@@ -154,25 +183,16 @@ func dnsResponseCodeToString(dnsRCode layers.DNSResponseCode) string {
 	}
 }
 
-func createLogFiles(baseDir string) (map[string]*os.File, error) {
-	logs := make(map[string]*os.File)
-
-	// Define the log file names
+func createLogFiles(baseDir string) (map[string]string, error) {
+	logs := make(map[string]string)
 	logFileNames := map[string]string{
 		"conn": "conn.log",
 		"dns":  "dns.log",
 		"http": "http.log",
 	}
-
 	for logType, fileName := range logFileNames {
 		logFilePath := filepath.Join(baseDir, fileName)
-		// Create or open the log file directly in the base directory
-		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, err
-		}
-		logs[logType] = logFile
+		logs[logType] = logFilePath
 	}
-
 	return logs, nil
 }

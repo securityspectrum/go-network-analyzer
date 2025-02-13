@@ -1,4 +1,8 @@
-This is a light-weight zeek-like network analyzer.
+This is a light-weight zeek-like network analyzer. 
+The part which was inspired from zeek is mostly the 
+connection caching based on tcp flags/states 
+For original zeek source code, visit: https://github.com/zeek/zeek
+
 
 Requirements: 
  - Requires npcap for Windows: https://npcap.com/dist/npcap-1.79.exe
@@ -11,7 +15,7 @@ go mod tidy
 
 Run the program from source code:
 ```
-go run main.go types.go strategy.go connection.go device_manager.go -verbose
+sudo go run . -verbose
 ```
 
 To build a binary:
@@ -23,7 +27,7 @@ GOOS=windows GOARCH=amd64 go build -o network-analyzer-win.exe .
 
 For macOS:
 ```
-GOOS=darwin GOARCH=amd64 go build -o network-analyzer-macos-darwin . 
+GOOS=darwin GOARCH=amd64 go build -o network-analyzer-darwin . 
 chmod +x network-analyzer-darwin
 ./network-analyzer-darwin -verbose
 ```
