@@ -23,7 +23,7 @@ GOOS=windows GOARCH=amd64 go build -o network-analyzer-win.exe .
 
 For macOS:
 ```
-GOOS=darwin GOARCH=amd64 go build -o network-analyzer-macos-darwin . 
+GOOS=darwin GOARCH=amd64 go build -o network-analyzer-darwin . 
 chmod +x network-analyzer-darwin
 ./network-analyzer-darwin -verbose
 ```
