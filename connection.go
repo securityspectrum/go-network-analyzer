@@ -1,4 +1,7 @@
 // connection.go
+// Portions of this file are derived from Zeek, originally licensed under the BSD 3-Clause License.
+// (C) [1995-now] [The Regents of the University of California through the Lawrence Berkeley National
+// Laboratory and the  International Computer Science Institute]. See THIRD_PARTY_LICENSES.txt file for details.
 package main
 
 import (
